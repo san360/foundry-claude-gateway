@@ -13,9 +13,87 @@
 
 The Azure Marketplace agreement for Claude has not been accepted on this subscription. Deploy one Claude model once from the Foundry portal to accept the terms interactively, then re-run the template. Also confirm the subscription is not CSP, credit-only or sponsored — those cannot transact Marketplace offers.
 
+### `Marketplace purchases are disabled for this subscription due to policy restrictions`
+
+Verified failure mode. The full error is:
+
+```
+UserError: Error occurred when subscribing to Marketplace: Marketplace Subscription
+purchase eligibility check failed ... This subscription is internal or sandbox.
+Only $0.00 products or test products can be purchased ... Marketplace purchases are
+disabled for this subscription '<id>' due to policy restrictions.
+```
+
+Claude on Foundry is a Marketplace offer, so **internal, sandbox and monetary-credit subscriptions cannot deploy it at all**. There is no template workaround — you must use a subscription with a real payment instrument.
+
+This failure is late and misleading: Log Analytics, Application Insights, the Foundry account *and* the project all report `Succeeded`, and only the `Microsoft.CognitiveServices/accounts/deployments` resource fails. Do not read the partially-created resource group as a template defect.
+
+Confirm eligibility before a long deployment:
+
+```powershell
+az account show --query "{name:name, id:id}" -o json
+# then probe cheaply: one model, capacity 1, no gateway
+az deployment sub create --name probe --location eastus2 `
+  --template-file infra/main.bicep --parameters infra/main.bicepparam `
+  --parameters workloadName=probe sonnetModel='' opusModel='' `
+  --parameters haikuCapacity=1 deployGateway=false
+```
+
+### `Failed to list key. disableLocalAuth is set to be true`
+
+Verified failure mode. Returned by `az cognitiveservices account keys list` even when the template sets `disableFoundryLocalAuth = false`.
+
+Many enterprise and Microsoft-internal tenants attach an Azure Policy with a `modify` effect that forces `properties.disableLocalAuth = true` on every Cognitive Services account. The policy wins: ARM reports your deployment as `Succeeded` with the value you asked for, but the live resource has `true`.
+
+Check what actually landed rather than what you requested:
+
+```powershell
+az cognitiveservices account show -n <account> -g <rg> `
+  --query properties.disableLocalAuth
+```
+
+If it returns `true`, API keys are permanently unavailable on that account and every key-based call returns `401`. This is not a defect — take the Entra path, which is the recommended configuration anyway:
+
+- Direct: unset `ANTHROPIC_FOUNDRY_API_KEY` and let Claude Code use `DefaultAzureCredential`, or supply `ANTHROPIC_FOUNDRY_AUTH_TOKEN`. See [03-claude-code-direct.md](03-claude-code-direct.md).
+- Gateway: keep `gatewayBackendAuthMode = 'managedIdentity'` (the default). A `passthrough` backend cannot work against a key-disabled account unless the caller presents an Entra token.
+
+A telltale sign in the deployment list is a system-injected `PolicyDeployment_<digits>` entry:
+
+```powershell
+az deployment group list -g <rg> --query "[].name" -o tsv
+```
+
 ### `The model 'claude-...' is not available in region '...'`
 
 Region/model mismatch. Change `location`, or set that model parameter to `''` and redeploy. Check the Foundry portal model catalog for current availability — it changes.
+
+### Model version mismatch — `haikuModelVersion` / `sonnetModelVersion` / `opusModelVersion`
+
+Verified failure mode. **Claude model versions on Foundry are not uniform across families**, which is why the template exposes one version parameter per family instead of a single global one.
+
+Measured in `eastus2`, version `2` means "hosted on Azure" and version `1`/`<date>` means the partner-hosted variant:
+
+| Model | Versions published |
+|---|---|
+| `claude-haiku-4-5` | `20251001`, `2` |
+| `claude-sonnet-4-6` | `1` only — **no version 2** |
+| `claude-opus-4-8` | `1`, `2` |
+
+Pinning `2` for every family therefore fails on `claude-sonnet-4-6`. Always check before deploying:
+
+```powershell
+az cognitiveservices model list --location eastus2 `
+  --query "[?model.format=='Anthropic'].{name:model.name, version:model.version}" -o table
+```
+
+Quota is tracked per version, and a `.Azure` suffix in the quota name is the version-2 counter. A limit of `0` means the model cannot be deployed on that subscription no matter what capacity you request:
+
+```powershell
+az cognitiveservices usage list --location eastus2 `
+  --query "[?contains(name.value,'laude')].{name:name.value, limit:limit, used:currentValue}" -o table
+```
+
+`capacity` on a deployment is expressed in the same units as `limit` (thousands of tokens per minute).
 
 ### HTTP 409 on a deployment
 

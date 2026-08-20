@@ -18,7 +18,16 @@ param location = 'eastus2'
 // -----------------------------------------------------------------------------
 // Claude deployments. Deployment names become the values you set as
 // ANTHROPIC_DEFAULT_*_MODEL for Claude Code. Set a family to '' to skip it.
-// Check availability in your region before changing these.
+//
+// ALWAYS check availability, version AND quota in your region first:
+//   az cognitiveservices model list --location eastus2 \
+//     --query "[?model.format=='Anthropic'].{name:model.name, version:model.version}" -o table
+//   az cognitiveservices usage list --location eastus2 \
+//     --query "[?contains(name.value,'laude')].{name:name.value, limit:limit}" -o table
+//
+// Version '2' = Hosted on Azure (inference stays in Azure), shown in the quota
+// list with an ".Azure" suffix. Version '1' = Hosted on Anthropic. Not every
+// model offers both, and a model with limit 0 cannot be deployed at all.
 // -----------------------------------------------------------------------------
 param haikuModel = 'claude-haiku-4-5'
 param sonnetModel = 'claude-sonnet-4-6'
@@ -27,8 +36,11 @@ param opusModel = ''
 param haikuCapacity = 10
 param sonnetCapacity = 25
 
-// '2' = Hosted on Azure (inference stays in Azure). '1' = Hosted on Anthropic.
-param modelVersion = '2'
+// Verified in eastus2: haiku-4-5 offers version 2 (Hosted on Azure), while
+// sonnet-4-6 is only published as version 1.
+param haikuModelVersion = '2'
+param sonnetModelVersion = '1'
+param opusModelVersion = '2'
 
 // -----------------------------------------------------------------------------
 // Access. Set principalId to your own object ID so you can call the model with

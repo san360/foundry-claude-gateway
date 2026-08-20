@@ -54,8 +54,14 @@ param sonnetCapacity int = 25
 @description('Capacity in thousands of tokens per minute for the Opus deployment.')
 param opusCapacity int = 25
 
-@description('Model version. "2" is Hosted on Azure, "1" is Hosted on Anthropic infrastructure.')
-param modelVersion string = '2'
+@description('Model version for the Haiku deployment. "2" is Hosted on Azure, "1" is Hosted on Anthropic infrastructure. Availability differs per model — check with: az cognitiveservices model list --location <region> --query "[?model.format==\'Anthropic\']"')
+param haikuModelVersion string = '2'
+
+@description('Model version for the Sonnet deployment. "2" is Hosted on Azure, "1" is Hosted on Anthropic infrastructure.')
+param sonnetModelVersion string = '2'
+
+@description('Model version for the Opus deployment. "2" is Hosted on Azure, "1" is Hosted on Anthropic infrastructure.')
+param opusModelVersion string = '2'
 
 // -- Anthropic model-provider attestation -------------------------------------
 
@@ -211,7 +217,9 @@ module foundry 'modules/foundry.bicep' = {
     haikuCapacity: haikuCapacity
     sonnetCapacity: sonnetCapacity
     opusCapacity: opusCapacity
-    modelVersion: modelVersion
+    haikuModelVersion: haikuModelVersion
+    sonnetModelVersion: sonnetModelVersion
+    opusModelVersion: opusModelVersion
     claudeOrganizationName: claudeOrganizationName
     claudeCountryCode: claudeCountryCode
     claudeIndustry: claudeIndustry

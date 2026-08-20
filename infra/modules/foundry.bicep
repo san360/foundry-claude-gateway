@@ -39,8 +39,14 @@ param sonnetCapacity int = 25
 @description('Capacity in thousands of tokens per minute for the Opus deployment.')
 param opusCapacity int = 25
 
-@description('Model version to deploy. Version 2 is "Hosted on Azure"; version 1 is "Hosted on Anthropic".')
-param modelVersion string = '2'
+@description('Model version for the Haiku deployment. Version 2 is "Hosted on Azure"; version 1 is "Hosted on Anthropic". Availability differs per model.')
+param haikuModelVersion string = '2'
+
+@description('Model version for the Sonnet deployment. Version 2 is "Hosted on Azure"; version 1 is "Hosted on Anthropic". Availability differs per model.')
+param sonnetModelVersion string = '2'
+
+@description('Model version for the Opus deployment. Version 2 is "Hosted on Azure"; version 1 is "Hosted on Anthropic". Availability differs per model.')
+param opusModelVersion string = '2'
 
 // -- Anthropic model-provider attestation ------------------------------------
 // These values are sent to Anthropic with every request. They must describe the
@@ -158,7 +164,7 @@ resource haikuDeployment 'Microsoft.CognitiveServices/accounts/deployments@2025-
     model: {
       format: 'Anthropic'
       name: haikuModel
-      version: modelVersion
+      version: haikuModelVersion
     }
     #disable-next-line BCP037
     modelProviderData: {
@@ -185,7 +191,7 @@ resource sonnetDeployment 'Microsoft.CognitiveServices/accounts/deployments@2025
     model: {
       format: 'Anthropic'
       name: sonnetModel
-      version: modelVersion
+      version: sonnetModelVersion
     }
     #disable-next-line BCP037
     modelProviderData: {
@@ -213,7 +219,7 @@ resource opusDeployment 'Microsoft.CognitiveServices/accounts/deployments@2025-1
     model: {
       format: 'Anthropic'
       name: opusModel
-      version: modelVersion
+      version: opusModelVersion
     }
     #disable-next-line BCP037
     modelProviderData: {

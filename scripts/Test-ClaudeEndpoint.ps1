@@ -62,7 +62,19 @@ switch ($Auth) {
         if ($Mode -eq 'Direct') {
             $key = az cognitiveservices account keys list --name $o.foundryAccountName `
                 --resource-group $o.resourceGroupName --query key1 -o tsv
-            if ($LASTEXITCODE -ne 0 -or -not $key) { throw 'Could not read the Foundry key (local auth may be disabled).' }
+            if ($LASTEXITCODE -ne 0 -or -not $key) {
+                throw @'
+Could not read the Foundry key.
+
+If the error mentions "disableLocalAuth is set to be true", API keys are turned off on
+this account. Many enterprise tenants enforce that with an Azure Policy modify effect,
+which overrides the template's disableFoundryLocalAuth = false. Confirm with:
+
+  az cognitiveservices account show -n <account> -g <rg> --query properties.disableLocalAuth
+
+Re-run this script with -Auth Entra. See docs/07-troubleshooting.md.
+'@
+            }
             $headers['api-key'] = $key
         }
         else {

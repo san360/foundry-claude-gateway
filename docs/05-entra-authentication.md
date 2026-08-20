@@ -212,3 +212,53 @@ $payload = $payload.PadRight([int][math]::Ceiling($payload.Length/4)*4, '=')
 ```
 
 Check that `aud` matches `{{entra-audience}}` and `tid` matches `{{entra-tenant-id}}`. Mismatches here explain nearly every gateway `401`.
+
+## Verified against a live deployment
+
+Executed 2026-08-20 against a Foundry account in `eastus2` with `claude-haiku-4-5` (version `2`).
+
+### Direct path, Entra token — confirmed working
+
+```powershell
+$tok = az account get-access-token --resource https://ai.azure.com --query accessToken -o tsv
+@{ model = 'claude-haiku-4-5'; max_tokens = 100
+   messages = @(@{ role = 'user'; content = 'Say hello.' }) } |
+  ConvertTo-Json -Depth 5 | Set-Content "$env:TEMP\b.json" -Encoding ascii
+
+curl.exe -s -X POST "https://<account>.services.ai.azure.com/anthropic/v1/messages" `
+  -H "Authorization: Bearer $tok" `
+  -H "anthropic-version: 2023-06-01" `
+  -H "Content-Type: application/json" `
+  -d "@$env:TEMP\b.json"
+```
+
+Returned `HTTP 200`:
+
+```json
+{ "model": "claude-haiku-4-5-20251001", "type": "message", "role": "assistant",
+  "content": [ { "type": "text", "text": "..." } ],
+  "usage": { "input_tokens": 24, "output_tokens": 19, "service_tier": "standard" } }
+```
+
+Three things this proves:
+
+1. **`https://ai.azure.com` is the correct token resource.** Requesting `https://cognitiveservices.azure.com` against the `/anthropic` surface does not work; the Anthropic passthrough is a distinct audience.
+2. **`Cognitive Services User` is sufficient.** No key was ever issued, and no `Contributor` was needed.
+3. **The `model` field takes the deployment name** (`claude-haiku-4-5`), while the response echoes the resolved upstream build (`claude-haiku-4-5-20251001`).
+
+Two request-shaping notes that cost real debugging time:
+
+- Send the body from a **file** (`-d "@file"`), not an inline string. PowerShell mangles the embedded quotes of an inline JSON literal and Foundry replies `400 Request body could not be parsed as JSON` — which is easily misread as an auth problem.
+- `anthropic-version: 2023-06-01` is mandatory. Omitting it is also a `400`.
+
+### Keys were not merely unused — they were unavailable
+
+On the tenant used for this validation, `az cognitiveservices account keys list` failed:
+
+```
+(BadRequest) Failed to list key. disableLocalAuth is set to be true
+```
+
+even though the template deployed `disableFoundryLocalAuth = false`. An Azure Policy `modify` effect had rewritten the property after ARM accepted the request, and all three key-based calls (`api-key`, `x-api-key`, and no credential) returned `401`.
+
+This is a useful demo result rather than an obstacle: it shows the Entra path is the one that survives a hardened enterprise tenant, and it means `gatewayBackendAuthMode = 'managedIdentity'` is not just the recommended default but the only viable backend setting on such a subscription. See [07-troubleshooting.md](07-troubleshooting.md).
