@@ -1,0 +1,29 @@
+# Deployment outputs contain resource names and endpoints for the environment.
+.deployment-outputs.json
+
+# Compiled Bicep artifacts
+*.bicep.json
+infra/**/*.json
+!infra/**/*.bicepparam
+
+# Never commit credentials
+*.key
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local Claude Code state
+.claude/settings.local.json

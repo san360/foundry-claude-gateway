@@ -1,0 +1,5 @@
+# Anthropic SDK with the Microsoft Foundry client (AnthropicFoundry).
+anthropic>=0.75.0
+
+# Supplies DefaultAzureCredential for the Microsoft Entra ID paths.
+azure-identity>=1.19.0

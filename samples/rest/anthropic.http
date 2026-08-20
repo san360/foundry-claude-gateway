@@ -1,0 +1,110 @@
+### Claude on Microsoft Foundry - raw HTTP calls
+### Open with the VS Code "REST Client" extension, or copy the equivalent curl
+### commands from docs/07-troubleshooting.md.
+###
+### Fill these in from .deployment-outputs.json (written by scripts/deploy.ps1).
+
+@foundryResource = claudedemo-demo-abc123
+@apimName        = claudedemo-demo-abc123
+@model           = claude-sonnet-4-6
+
+@directBase  = https://{{foundryResource}}.services.ai.azure.com/anthropic
+@gatewayBase = https://{{apimName}}.azure-api.net/anthropic
+
+### Secrets. Prefer the Entra requests below; these exist to show both work.
+### az cognitiveservices account keys list -n <account> -g <rg> --query key1 -o tsv
+@foundryKey = <foundry-account-key>
+### az rest --method post --uri /subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.ApiManagement/service/<apim>/subscriptions/claude-code-demo/listSecrets?api-version=2024-05-01 --query primaryKey -o tsv
+@gatewayKey = <apim-subscription-key>
+
+### Microsoft Entra ID token for the Anthropic surface of Foundry.
+### az account get-access-token --resource https://ai.azure.com --query accessToken -o tsv
+@entraToken = <bearer-token>
+
+
+### 1. DIRECT + API key
+POST {{directBase}}/v1/messages
+api-key: {{foundryKey}}
+anthropic-version: 2023-06-01
+Content-Type: application/json
+
+{
+  "model": "{{model}}",
+  "max_tokens": 200,
+  "messages": [{ "role": "user", "content": "Say hello in one sentence." }]
+}
+
+
+### 2. DIRECT + Microsoft Entra ID
+POST {{directBase}}/v1/messages
+Authorization: Bearer {{entraToken}}
+anthropic-version: 2023-06-01
+Content-Type: application/json
+
+{
+  "model": "{{model}}",
+  "max_tokens": 200,
+  "messages": [{ "role": "user", "content": "Say hello in one sentence." }]
+}
+
+
+### 3. GATEWAY + API Management subscription key
+### The subscription key header is 'api-key' by default so client code is
+### identical to the direct path. See gatewaySubscriptionKeyHeader in the outputs.
+POST {{gatewayBase}}/v1/messages
+api-key: {{gatewayKey}}
+anthropic-version: 2023-06-01
+Content-Type: application/json
+
+{
+  "model": "{{model}}",
+  "max_tokens": 200,
+  "messages": [{ "role": "user", "content": "Say hello in one sentence." }]
+}
+
+
+### 4. GATEWAY + Microsoft Entra ID
+### Requires client-auth-mode = entra or either. The gateway validates the token,
+### then either forwards it (passthrough) or swaps it for its managed identity.
+POST {{gatewayBase}}/v1/messages
+Authorization: Bearer {{entraToken}}
+anthropic-version: 2023-06-01
+Content-Type: application/json
+
+{
+  "model": "{{model}}",
+  "max_tokens": 200,
+  "messages": [{ "role": "user", "content": "Say hello in one sentence." }]
+}
+
+
+### 5. GATEWAY + streaming (proves buffer-response="false" works)
+POST {{gatewayBase}}/v1/messages
+api-key: {{gatewayKey}}
+anthropic-version: 2023-06-01
+Content-Type: application/json
+
+{
+  "model": "{{model}}",
+  "max_tokens": 400,
+  "stream": true,
+  "messages": [{ "role": "user", "content": "Count from 1 to 20." }]
+}
+
+
+### 6. Token counting (no inference charge, useful for governance demos)
+POST {{gatewayBase}}/v1/messages/count_tokens
+api-key: {{gatewayKey}}
+anthropic-version: 2023-06-01
+Content-Type: application/json
+
+{
+  "model": "{{model}}",
+  "messages": [{ "role": "user", "content": "How many tokens is this?" }]
+}
+
+
+### 7. List models available on the endpoint
+GET {{directBase}}/v1/models
+Authorization: Bearer {{entraToken}}
+anthropic-version: 2023-06-01

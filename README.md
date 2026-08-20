@@ -1,0 +1,122 @@
+# Claude models in Microsoft Foundry — direct and AI gateway demo
+
+An end-to-end, deployable demonstration of **Anthropic Claude models running in Microsoft Foundry**, consumed two ways:
+
+1. **Direct** — Claude Code (and any Anthropic SDK client) calls the Foundry Anthropic endpoint.
+2. **Via the AI gateway** — the same clients call **Azure API Management**, which fronts Foundry with token governance, per-caller quotas, telemetry and centralized identity.
+
+Both paths support **Microsoft Entra ID authentication with no API keys at all**. See [docs/05-entra-authentication.md](docs/05-entra-authentication.md) for the full matrix and the caveats.
+
+```mermaid
+flowchart LR
+    subgraph Client["Developer workstation"]
+        CC["Claude Code<br/>CLAUDE_CODE_USE_FOUNDRY=1"]
+        SDK["Anthropic SDK<br/>AnthropicFoundry"]
+    end
+
+    subgraph Azure["Azure subscription"]
+        subgraph APIM["Azure API Management (v2 tier)"]
+            POL["AI gateway policy<br/>validate-azure-ad-token<br/>llm-token-limit<br/>llm-emit-token-metric<br/>authentication-managed-identity"]
+        end
+        subgraph FDY["Microsoft Foundry (AIServices)"]
+            DEP["Claude deployments<br/>haiku / sonnet / opus"]
+        end
+        AI["Application Insights<br/>+ Log Analytics"]
+    end
+
+    ENTRA["Microsoft Entra ID"]
+
+    CC -- "1 direct<br/>/anthropic/v1/messages" --> FDY
+    SDK -- "1 direct" --> FDY
+    CC -- "2 gateway<br/>/anthropic/v1/messages" --> APIM
+    SDK -- "2 gateway" --> APIM
+    APIM -- "managed identity token<br/>or passthrough" --> FDY
+    ENTRA -. "bearer token" .-> CC
+    ENTRA -. "validate" .-> POL
+    ENTRA -. "RBAC: Cognitive Services User" .-> FDY
+    POL --> AI
+    FDY --> AI
+```
+
+## What gets deployed
+
+| Resource | Purpose |
+| --- | --- |
+| `Microsoft.CognitiveServices/accounts` (kind `AIServices`) | The Foundry account exposing `https://<name>.services.ai.azure.com/anthropic` |
+| `accounts/projects` | Foundry project for portal-side experimentation |
+| `accounts/deployments` × 1–3 | Claude Haiku / Sonnet / Opus, `GlobalStandard` |
+| `Microsoft.ApiManagement/service` (BasicV2 by default) | The AI gateway. **A v2 tier is required** for Anthropic Messages API support |
+| APIM API + policy + backend + named values | Anthropic Messages API surface with governance and pluggable auth |
+| Log Analytics + Application Insights | Request tracing and per-caller token metrics |
+| Role assignments | `Cognitive Services User` for you and for the gateway managed identity |
+
+## Quick start
+
+```powershell
+# 0. Prerequisites: Azure CLI, Bicep, a subscription with the Claude Marketplace
+#    offer available, and Owner or User Access Administrator on it.
+az login
+
+# 1. Set your organization details (required by Anthropic's model attestation).
+#    Edit infra/main.bicepparam -> claudeOrganizationName, claudeCountryCode, claudeIndustry.
+
+# 2. Deploy. API Management provisioning takes 15-45 minutes on first create.
+./scripts/deploy.ps1 -Location eastus2 -GrantSelfAccess
+
+# 3a. Point Claude Code at Foundry directly, using Entra (no keys).
+. ./scripts/Set-ClaudeCodeEnv.ps1 -Mode Direct -Auth Entra
+./scripts/Test-ClaudeEndpoint.ps1 -Mode Direct -Auth Entra
+claude          # then /status -> API provider: Microsoft Foundry
+
+# 3b. Now route the identical client through the AI gateway.
+. ./scripts/Set-ClaudeCodeEnv.ps1 -Mode Gateway -Auth Entra
+./scripts/Test-ClaudeEndpoint.ps1 -Mode Gateway -Auth Entra
+claude
+```
+
+On macOS or Linux use `source ./scripts/set-claude-code-env.sh direct entra` instead.
+
+## Documentation
+
+| Doc | Contents |
+| --- | --- |
+| [01 — Architecture](docs/01-architecture.md) | Components, request flows, design decisions and why each one was made |
+| [02 — Deploy](docs/02-deploy.md) | Prerequisites, parameters, deployment, teardown |
+| [03 — Claude Code direct](docs/03-claude-code-direct.md) | Every environment variable, model pinning, desktop app and CLI |
+| [04 — Claude Code via the AI gateway](docs/04-claude-code-gateway.md) | Gateway configuration, policy walkthrough, governance features |
+| [05 — Entra authentication](docs/05-entra-authentication.md) | **The auth matrix**: does Entra work for both paths, and how |
+| [06 — Demo script](docs/06-demo-script.md) | A 20-minute run-of-show with talk track and expected output |
+| [07 — Troubleshooting](docs/07-troubleshooting.md) | Error-by-error diagnosis for both paths |
+
+## Repository layout
+
+```
+infra/
+  main.bicep                     subscription-scoped orchestrator
+  main.bicepparam                the knobs you actually change
+  modules/
+    foundry.bicep                Foundry account, project, Claude deployments, RBAC
+    apim.bicep                   API Management v2 + Application Insights logger
+    apim-anthropic-api.bicep     Anthropic API, backend, named values, policy, product
+    monitoring.bicep             Log Analytics + Application Insights
+  policies/
+    anthropic-api.xml            the AI gateway policy (the heart of the demo)
+scripts/
+  deploy.ps1                     deploy and capture outputs
+  Set-ClaudeCodeEnv.ps1          configure Claude Code (PowerShell)
+  set-claude-code-env.sh         configure Claude Code (bash/zsh)
+  Test-ClaudeEndpoint.ps1        smoke test either path, either credential
+  Set-GatewayAuthMode.ps1        switch auth topology live, without redeploying
+samples/
+  python/hello_claude.py         Anthropic SDK, all four path/credential combos
+  rest/anthropic.http            raw HTTP requests for VS Code REST Client
+docs/                            see the table above
+```
+
+## Key facts worth knowing before you demo
+
+- The `model` field in a request is the **Foundry deployment name**, not the Anthropic model ID. This is the single most common demo failure.
+- Claude Code has **no interactive setup wizard** for Foundry (unlike Bedrock and Vertex). Configuration is environment variables only.
+- **Always pin models.** Without `ANTHROPIC_DEFAULT_SONNET_MODEL` and friends, aliases resolve to Claude Code's built-in Foundry defaults, which may not exist in your account. There is no startup validation, so the failure appears mid-conversation.
+- The Anthropic Messages API schema in the API Management AI gateway requires a **v2 tier** (`BasicV2`, `StandardV2`, `PremiumV2`).
+- Claude on Foundry bills in **Claude Consumption Units** through Azure Marketplace, and is unavailable on CSP, credit-only and sponsored subscriptions.

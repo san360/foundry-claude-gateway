@@ -1,0 +1,154 @@
+<!--
+  Azure API Management - AI gateway policy for the Anthropic Messages API
+  backed by Claude models in Microsoft Foundry.
+
+  Client call:   https://<apim>.azure-api.net/anthropic/v1/messages
+  Backend call:  https://<foundry>.services.ai.azure.com/anthropic/v1/messages
+
+  Behaviour is driven by named values so the same deployment can demonstrate
+  several authentication topologies without redeploying the policy:
+
+    {{client-auth-mode}}        subscriptionKey | entra | either
+    {{backend-auth-mode}}       managedIdentity | passthrough
+    {{entra-tenant-id}}         tenant used to validate inbound Entra tokens
+    {{entra-audience}}          expected "aud" claim on inbound Entra tokens
+    {{foundry-token-resource}}  resource the gateway managed identity requests
+
+  __TOKENS_PER_MINUTE__ and __BACKEND_ID__ are substituted at deploy time by
+  infra/modules/apim-anthropic-api.bicep.
+
+  Note: C# string literals inside XML attributes must be escaped as &quot;.
+-->
+<policies>
+  <inbound>
+    <base />
+
+    <!--
+      STEP 1 - Inbound identity.
+
+      subscriptionKey : the gateway validated the API Management subscription
+                        key before policy execution, so nothing is left to do.
+      entra           : require and validate a Microsoft Entra ID token.
+      either          : validate an Entra token when one is presented,
+                        otherwise fall back to the subscription key.
+    -->
+    <choose>
+      <when condition="@(&quot;{{client-auth-mode}}&quot; == &quot;subscriptionKey&quot;)">
+        <!-- Subscription key already validated by the gateway. -->
+      </when>
+      <when condition="@(&quot;{{client-auth-mode}}&quot; == &quot;either&quot; &amp;&amp; !context.Request.Headers.ContainsKey(&quot;Authorization&quot;))">
+        <!-- No bearer token presented, so the subscription key is the credential. -->
+      </when>
+      <otherwise>
+        <validate-azure-ad-token tenant-id="{{entra-tenant-id}}" header-name="Authorization" failed-validation-httpcode="401" failed-validation-error-message="Unauthorized. A valid Microsoft Entra ID token is required to call this gateway." output-token-variable-name="callerToken">
+          <audiences>
+            <audience>{{entra-audience}}</audience>
+          </audiences>
+        </validate-azure-ad-token>
+      </otherwise>
+    </choose>
+
+    <!--
+      Identify the caller for governance and telemetry. Prefers the Entra
+      object ID, then the API Management subscription, then the client IP, so
+      the expression never throws regardless of the authentication mode.
+    -->
+    <set-variable name="callerId" value="@{
+        if (context.Variables.ContainsKey(&quot;callerToken&quot;))
+        {
+            var jwt = (Jwt)context.Variables[&quot;callerToken&quot;];
+            if (jwt.Claims.ContainsKey(&quot;oid&quot;))
+            {
+                return jwt.Claims[&quot;oid&quot;].FirstOrDefault();
+            }
+            if (jwt.Claims.ContainsKey(&quot;appid&quot;))
+            {
+                return jwt.Claims[&quot;appid&quot;].FirstOrDefault();
+            }
+        }
+        if (context.Subscription != null)
+        {
+            return context.Subscription.Id;
+        }
+        return context.Request.IpAddress;
+    }" />
+
+    <!--
+      STEP 2 - Token governance.
+
+      The llm-token-limit policy understands the Anthropic Messages API schema
+      on API Management v2 tiers. It returns 429 once the per-caller budget is
+      exhausted and reports consumption back on every response.
+    -->
+    <llm-token-limit counter-key="@((string)context.Variables[&quot;callerId&quot;])" tokens-per-minute="__TOKENS_PER_MINUTE__" estimate-prompt-tokens="false" remaining-tokens-header-name="x-gateway-tokens-remaining" tokens-consumed-header-name="x-gateway-tokens-consumed" retry-after-header-name="Retry-After" />
+
+    <!-- Emit prompt, completion and total token counts to Application Insights. -->
+    <llm-emit-token-metric namespace="foundry-ai-gateway">
+      <dimension name="CallerId" value="@((string)context.Variables[&quot;callerId&quot;])" />
+      <dimension name="ApiId" value="@(context.Api.Id)" />
+      <dimension name="OperationId" value="@(context.Operation.Id)" />
+    </llm-emit-token-metric>
+
+    <!-- STEP 3 - Backend routing and backend identity. -->
+    <set-backend-service backend-id="__BACKEND_ID__" />
+
+    <choose>
+      <when condition="@(&quot;{{backend-auth-mode}}&quot; == &quot;passthrough&quot;)">
+        <!--
+          The caller's own Entra token is forwarded unchanged. Foundry
+          evaluates Azure RBAC against the end user, so per-user access control
+          and audit trails are preserved end to end.
+        -->
+        <set-header name="api-key" exists-action="delete" />
+        <set-header name="x-api-key" exists-action="delete" />
+      </when>
+      <otherwise>
+        <!--
+          The gateway swaps the client credential for its own managed identity
+          token. Clients never hold a Foundry credential, so the Foundry
+          account can have local (key) authentication disabled entirely.
+        -->
+        <authentication-managed-identity resource="{{foundry-token-resource}}" output-token-variable-name="foundryToken" ignore-error="false" />
+        <set-header name="Authorization" exists-action="override">
+          <value>@("Bearer " + (string)context.Variables["foundryToken"])</value>
+        </set-header>
+        <set-header name="api-key" exists-action="delete" />
+        <set-header name="x-api-key" exists-action="delete" />
+      </otherwise>
+    </choose>
+
+    <!-- Never leak the gateway credential to the model backend. -->
+    <set-header name="Ocp-Apim-Subscription-Key" exists-action="delete" />
+
+    <!--
+      The Messages API requires a version header. Supplying a default keeps
+      minimal clients and the portal test console working unchanged.
+    -->
+    <set-header name="anthropic-version" exists-action="skip">
+      <value>2023-06-01</value>
+    </set-header>
+  </inbound>
+
+  <backend>
+    <!--
+      buffer-response="false" is required for Claude's server-sent event
+      streaming, which Claude Code uses for every request.
+    -->
+    <forward-request buffer-response="false" timeout="240" />
+  </backend>
+
+  <outbound>
+    <base />
+    <!-- Makes the gateway hop visible during the demo without altering the payload. -->
+    <set-header name="x-gateway" exists-action="override">
+      <value>azure-api-management</value>
+    </set-header>
+  </outbound>
+
+  <on-error>
+    <base />
+    <set-header name="x-gateway-error" exists-action="override">
+      <value>@(context.LastError != null ? context.LastError.Reason : "unknown")</value>
+    </set-header>
+  </on-error>
+</policies>
