@@ -37,7 +37,27 @@
         <!-- Subscription key already validated by the gateway. -->
       </when>
       <when condition="@(&quot;{{client-auth-mode}}&quot; == &quot;either&quot; &amp;&amp; !context.Request.Headers.ContainsKey(&quot;Authorization&quot;))">
-        <!-- No bearer token presented, so the subscription key is the credential. -->
+        <!--
+          No bearer token, so an API Management subscription key must be the
+          credential. In 'either' mode the API is deployed with
+          subscriptionRequired = false (otherwise the gateway would reject
+          Entra-only callers before this policy ever runs), which means the
+          built-in check is off and the key must be enforced here.
+        -->
+        <choose>
+          <when condition="@(context.Subscription == null)">
+            <return-response>
+              <set-status code="401" reason="Unauthorized" />
+              <set-header name="Content-Type" exists-action="override">
+                <value>application/json</value>
+              </set-header>
+              <set-header name="x-gateway-error" exists-action="override">
+                <value>NoCredentialPresented</value>
+              </set-header>
+              <set-body>{ "type": "error", "error": { "type": "authentication_error", "message": "Unauthorized. Present either a Microsoft Entra ID bearer token in the Authorization header or a valid API Management subscription key." } }</set-body>
+            </return-response>
+          </when>
+        </choose>
       </when>
       <otherwise>
         <validate-azure-ad-token tenant-id="{{entra-tenant-id}}" header-name="Authorization" failed-validation-httpcode="401" failed-validation-error-message="Unauthorized. A valid Microsoft Entra ID token is required to call this gateway." output-token-variable-name="callerToken">

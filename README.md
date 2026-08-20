@@ -120,3 +120,50 @@ docs/                            see the table above
 - **Always pin models.** Without `ANTHROPIC_DEFAULT_SONNET_MODEL` and friends, aliases resolve to Claude Code's built-in Foundry defaults, which may not exist in your account. There is no startup validation, so the failure appears mid-conversation.
 - The Anthropic Messages API schema in the API Management AI gateway requires a **v2 tier** (`BasicV2`, `StandardV2`, `PremiumV2`).
 - Claude on Foundry bills in **Claude Consumption Units** through Azure Marketplace, and is unavailable on CSP, credit-only and sponsored subscriptions.
+
+## Deployment status — verified end to end
+
+Both scenarios were deployed to Azure and exercised with live inference on 2026-08-20
+(`eastus2`, API Management `BasicV2`, Foundry with `claude-haiku-4-5` v2 and
+`claude-sonnet-4-6` v1).
+
+| Check | Result |
+|---|---|
+| Scenario 1 — direct to Foundry, Entra token | `200` |
+| Scenario 1 — direct to Foundry, API key | blocked by tenant policy (see below) |
+| Scenario 2 — via gateway, subscription key | `200` |
+| Scenario 2 — via gateway, Entra token | `200` |
+| Scenario 2 — via gateway, no credential | `401` |
+| Backend auth `managedIdentity` | `200` |
+| Backend auth `passthrough` with caller token | `200` |
+| SSE streaming through the gateway | full event sequence |
+| Gateway token budget (`llm-token-limit`) | `429` + `Retry-After` |
+| Both models, both paths | `200` |
+
+Four findings from that exercise are worth reading before you present this:
+
+1. **Claude model versions are not uniform.** `claude-sonnet-4-6` publishes version `1`
+   only, while `claude-haiku-4-5` and `claude-opus-4-8` publish version `2`. That is why
+   the template exposes `haikuModelVersion`, `sonnetModelVersion` and `opusModelVersion`
+   separately rather than one global version.
+
+2. **Internal, sandbox and credit-only subscriptions cannot deploy Claude at all.** It is
+   a Marketplace offer. The failure is late and misleading — the Foundry account and
+   project both report `Succeeded` and only the model deployment fails. Probe with one
+   model at capacity 1 before committing to a 30-minute run.
+
+3. **A tenant Azure Policy can force `disableLocalAuth = true`,** overriding the
+   template's `disableFoundryLocalAuth = false` after ARM reports success. API keys then
+   cannot be issued at all. This turned out to be a good thing to demo: the entire flow
+   above ran with **no Foundry key in existence**, which is the strongest possible version
+   of the Entra story.
+
+4. **API Management checks the subscription key before the inbound policy runs.** Any
+   client-auth mode that permits Entra must therefore deploy the API with
+   `subscriptionRequired = false` and enforce credentials in policy instead, or
+   Entra-only callers are rejected before `validate-azure-ad-token` is ever reached.
+
+Full evidence, request/response transcripts and the exact error strings are in
+[docs/05-entra-authentication.md](docs/05-entra-authentication.md),
+[docs/04-claude-code-gateway.md](docs/04-claude-code-gateway.md) and
+[docs/07-troubleshooting.md](docs/07-troubleshooting.md).

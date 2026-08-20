@@ -245,7 +245,11 @@ module gatewayApi 'modules/apim-anthropic-api.bicep' = if (deployGateway) {
     foundryTokenResource: foundryTokenResource
     tokensPerMinute: gatewayTokensPerMinute
     subscriptionKeyHeader: gatewaySubscriptionKeyHeader
-    subscriptionRequired: gatewayClientAuthMode != 'entra'
+    // API Management validates the subscription key in its own pipeline, *before* the
+    // inbound policy executes. Leaving the built-in check on for 'either' would reject
+    // Entra-only callers with SubscriptionKeyNotFound before the policy could accept
+    // them, so the check is delegated to the policy for any mode that permits Entra.
+    subscriptionRequired: gatewayClientAuthMode == 'subscriptionKey'
     bodyLogBytes: gatewayBodyLogBytes
   }
 }

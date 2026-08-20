@@ -48,7 +48,6 @@ $uri = "$($baseUrl.TrimEnd('/'))/v1/messages"
 
 $headers = @{
     'anthropic-version' = '2023-06-01'
-    'Content-Type'      = 'application/json'
 }
 
 switch ($Auth) {
@@ -103,14 +102,25 @@ Write-Host ''
 Write-Host ''
 
 try {
-    $response = Invoke-WebRequest -Uri $uri -Method Post -Headers $headers -Body $body -TimeoutSec 120
+    # -UseBasicParsing is required on Windows PowerShell 5.1: the default parser
+    # depends on the Internet Explorer engine and throws "Windows PowerShell is in
+    # NonInteractive mode" under automation. It is a harmless no-op on PowerShell 7+.
+    # The body is sent as UTF-8 bytes so non-ASCII prompts are not mangled.
+    $response = Invoke-WebRequest -Uri $uri -Method Post -Headers $headers -TimeoutSec 120 `
+        -ContentType 'application/json' -UseBasicParsing `
+        -Body ([Text.Encoding]::UTF8.GetBytes($body))
 }
 catch {
     $status = $_.Exception.Response.StatusCode.value__
     Write-Host "FAILED (HTTP $status)" -ForegroundColor Red
     if ($_.ErrorDetails.Message) { Write-Host $_.ErrorDetails.Message }
     switch ($status) {
-        401 { Write-Host "Hint: check RBAC. The caller needs 'Cognitive Services User' on the Foundry account." -ForegroundColor Yellow }
+        401 {
+            Write-Host "Hint: check RBAC. The caller needs 'Cognitive Services User' on the Foundry account." -ForegroundColor Yellow
+            if ($Mode -eq 'Gateway' -and $Auth -eq 'Key') {
+                Write-Host "Hint: if backend-auth-mode is 'passthrough', a subscription-key-only caller has no Entra token to forward, so Foundry rejects it. Use -Auth Entra, or run ./scripts/Set-GatewayAuthMode.ps1 -BackendAuth managedIdentity." -ForegroundColor Yellow
+            }
+        }
         403 { Write-Host 'Hint: the credential is valid but not authorized. Role assignments can take a few minutes.' -ForegroundColor Yellow }
         404 { Write-Host "Hint: the 'model' field must be the Foundry DEPLOYMENT name, not the model ID." -ForegroundColor Yellow }
         429 { Write-Host 'Hint: the gateway token-per-minute budget or the deployment capacity was exceeded.' -ForegroundColor Yellow }
@@ -118,7 +128,18 @@ catch {
     throw
 }
 
-$payload = $response.Content | ConvertFrom-Json
+$payload = if ($response.RawContentStream) {
+    # Windows PowerShell 5.1 decodes .Content with the response charset guessed from
+    # headers and mangles multi-byte UTF-8 (em dashes, smart quotes) in model output.
+    # Decoding the raw bytes explicitly keeps the text intact on both 5.1 and 7+.
+    $ms = New-Object IO.MemoryStream
+    $response.RawContentStream.Position = 0
+    $response.RawContentStream.CopyTo($ms)
+    [Text.Encoding]::UTF8.GetString($ms.ToArray()) | ConvertFrom-Json
+}
+else {
+    $response.Content | ConvertFrom-Json
+}
 
 Write-Host 'SUCCESS' -ForegroundColor Green
 Write-Host ''

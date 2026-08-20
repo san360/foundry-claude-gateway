@@ -207,3 +207,95 @@ Edit `infra/policies/anthropic-api.xml`, then redeploy â€” the policy is embedde
 ```
 
 Watch for the two XML traps: no `--` inside comments, and escape `"` as `&quot;` inside attributes (element content is fine unescaped).
+
+## Verified against a live deployment
+
+Executed 2026-08-20 against API Management `BasicV2` in `eastus2`, fronting a Foundry
+account with `claude-haiku-4-5` and `gatewayBackendAuthMode = 'managedIdentity'`.
+The Foundry account had local (key) authentication disabled by tenant policy, so every
+result below was achieved with **no Foundry credential in existence anywhere**.
+
+### Client authentication matrix — `gatewayClientAuthMode = 'either'`
+
+| Caller presents | Result | Notes |
+|---|---|---|
+| API Management subscription key | `200` | `context.Subscription` resolves and the policy accepts |
+| Microsoft Entra ID bearer token | `200` | `validate-azure-ad-token` checks `aud` and `tid` |
+| Neither | `401` | Rejected by the policy with an Anthropic-shaped error body |
+
+Successful responses carry the gateway markers:
+
+```
+x-gateway: azure-api-management
+x-gateway-tokens-remaining: 19951
+x-gateway-tokens-consumed: 49
+```
+
+### `subscriptionRequired` must be off whenever Entra is permitted
+
+This is the one non-obvious part of the template, and it was found by testing rather than
+by reading documentation.
+
+**API Management validates the subscription key in its own pipeline, before the inbound
+policy runs.** If the API is deployed with `subscriptionRequired = true`, an Entra-only
+caller never reaches `validate-azure-ad-token`; the gateway rejects it first with:
+
+```
+HTTP 401  x-gateway-error: SubscriptionKeyNotFound
+{ "statusCode": 401, "message": "Access denied due to missing subscription key. ..." }
+```
+
+So the template sets:
+
+```bicep
+subscriptionRequired: gatewayClientAuthMode == 'subscriptionKey'
+```
+
+Turning the built-in check off moves responsibility to the policy, which must then reject
+anonymous callers itself — otherwise the API would be open. The `either` branch does that
+by testing `context.Subscription == null`. Usefully, **API Management still resolves a
+valid subscription key into `context.Subscription` even when `subscriptionRequired` is
+`false`**, which is what makes a single `either` mode possible at all.
+
+### Backend authentication — both topologies confirmed
+
+| `gatewayBackendAuthMode` | Caller auth | Result |
+|---|---|---|
+| `managedIdentity` | subscription key | `200` |
+| `managedIdentity` | Entra token | `200` |
+| `passthrough` | Entra token | `200` — caller's own token reaches Foundry, RBAC evaluated per user |
+| `passthrough` | subscription key | `401` at Foundry — nothing to forward |
+
+The last row is expected, not a defect: `passthrough` deliberately has no gateway-owned
+credential. Switch modes without redeploying:
+
+```powershell
+./scripts/Set-GatewayAuthMode.ps1 -BackendAuth passthrough
+./scripts/Set-GatewayAuthMode.ps1 -BackendAuth managedIdentity
+```
+
+### Token governance — confirmed enforcing
+
+With `gatewayTokensPerMinute = 300`, the `llm-token-limit` policy throttled on the third
+request:
+
+```
+req 1 -> HTTP 200   x-gateway-tokens-remaining: 38
+req 2 -> HTTP 200   x-gateway-tokens-remaining: 0
+req 3 -> HTTP 429   Retry-After: 41
+{ "statusCode": 429, "message": "Token limit is exceeded. Try again in 41 seconds." }
+```
+
+Note there are **two independent throttles**, and the tighter one wins. With a generous
+gateway budget but a small `haikuCapacity`, Foundry's own per-deployment quota answers
+first and the error text differs:
+
+```
+{"error":{"code":"RateLimitReached",
+  "message":"Rate limit of 2000 per 60s exceeded for UserByModelByMinuteOutputTokens."}}
+```
+
+Read the error body to know which layer throttled: `x-gateway-error:
+OpenAITokenLimitExceeded` and a `Retry-After` header mean the gateway, while a
+`RateLimitReached` / `UserByModelByMinute...` body means the model deployment. Raise
+`haikuCapacity` if you intend to demonstrate gateway-side governance.
