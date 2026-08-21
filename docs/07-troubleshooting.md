@@ -333,6 +333,14 @@ Three options, in order of practicality:
 
 Note that consent is only half the story. Even after an admin grants it, the user still needs the **Cognitive Services User** role on the Foundry account, or every call returns `403`.
 
+Check whether consent already exists before chasing this any further — an empty result means it does not:
+
+```powershell
+az ad app permission list-grants --id <app-client-id> -o table
+```
+
+Full background, including the portal click-path to hand to an administrator, is in [05-entra-authentication.md → Consent](05-entra-authentication.md#consent--the-part-that-actually-blocks-people).
+
 ### `AADSTS50011: The redirect URI specified in the request does not match`
 
 Entra wildcards the **port** of a `127.0.0.1` redirect but not the **path**. `browser` flow needs `http://127.0.0.1/callback` registered; a bare `http://127.0.0.1` is not a match. Re-run `New-FoundryAppRegistration.ps1`, which registers all three flows' URIs.

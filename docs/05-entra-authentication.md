@@ -168,6 +168,141 @@ Switch between them without redeploying:
 
 **Fully supported, in two distinct topologies.** Use `managedIdentity` when you want the gateway to be the trust boundary and Foundry to be reachable by exactly one identity. Use `passthrough` when Foundry-side per-user RBAC and audit are a compliance requirement.
 
+## The app registration — delegated access to Foundry
+
+**Who needs one.** Claude *Desktop* only. Claude Code authenticates as a Microsoft first-party client through `az login`, so it needs no registration and no consent — which is exactly why `Test-ClaudeEndpoint.ps1 -Auth Entra` can pass on a tenant where the desktop app is still stuck at a consent prompt. If you only ever demo the CLI, you can skip this section entirely.
+
+### Delegated, not application
+
+Two permission types exist and only one is right here:
+
+| | Delegated | Application |
+| --- | --- | --- |
+| Token represents | the signed-in user | the app itself |
+| Needs a user present | yes | no |
+| Client secret | none — public client + PKCE | required |
+| Foundry sees | the user's object ID | a service principal |
+| Right for Claude Desktop | **yes** | no |
+
+Claude Desktop is an interactive desktop client with no server side, so there is nowhere to keep a client secret. It registers as a **public client** and uses PKCE. That also means the registration itself is not a credential — it is only an identifier, so its client ID is safe to put in a config file or check into `.env.example`.
+
+**The delegated permission does not grant access.** It grants the app the right to *ask* for a token on the user's behalf. Whether that token can actually call a model is decided separately by Azure RBAC on the Foundry account. Two locks, both of which must be open — see [the second lock](#the-second-lock-rbac) below. This trips people up: consent succeeds, sign-in succeeds, and the first message still returns `401`.
+
+### The exact configuration
+
+| Property | Value | Why |
+| --- | --- | --- |
+| Resource application | `7d312290-28c8-473c-a0ed-8e53749b6d6d` | Azure Cognitive Services. Tenant-independent — the same GUID everywhere |
+| Delegated scope | `user_impersonation`, id `5f1e8914-a52b-429f-9324-91b92b81adaf` | The only scope the resource exposes; type `Scope`, not `Role` |
+| `isFallbackPublicClient` | `true` | Required for device-code, and for any flow with no client secret |
+| `signInAudience` | `AzureADMyOrg` | This tenant only. Widen deliberately, never by accident |
+| Redirect URI — browser | `http://127.0.0.1/callback` | Entra wildcards the loopback **port** but not the **path**. A bare `http://127.0.0.1` fails `AADSTS50011` |
+| Redirect URI — broker (Windows) | `ms-appx-web://Microsoft.AAD.BrokerPlugin/{clientId}` | Contains the app's own client ID |
+| Redirect URI — broker (macOS) | `msauth.com.anthropic.claudefordesktop://auth` | Anthropic's bundle identifier |
+| Client secret | **none** | A secret on a public client is a finding, not a feature |
+
+Registering all three redirect URIs costs nothing and lets you switch `inferenceFoundryAuthFlow` later without going back to Entra.
+
+### Creating it
+
+```powershell
+./scripts/New-FoundryAppRegistration.ps1 -GrantAdminConsent
+```
+
+Idempotent — it converges the same application object by display name rather than creating duplicates, so re-running it is safe. It prints the client ID, the tenant ID and the admin-consent URL.
+
+### Creating it by hand
+
+If policy requires the registration be made by someone else, this is the portal equivalent. **Entra admin centre → App registrations → New registration:**
+
+1. Name it, set **Supported account types** to *Accounts in this organizational directory only*, and register with no redirect URI.
+2. **Authentication → Add a platform → Mobile and desktop applications.** Add all three URIs from the table above. Set **Allow public client flows** to *Yes*.
+3. **API permissions → Add a permission → APIs my organization uses.** Search `Azure Cognitive Services` — if the name does not resolve, paste the GUID `7d312290-28c8-473c-a0ed-8e53749b6d6d`, which is stable across tenants. Choose **Delegated permissions** and tick `user_impersonation`.
+4. **Grant admin consent** — see below.
+5. Copy the **Application (client) ID** from *Overview*. That is what goes in `inferenceFoundryClientId`. It is **not** the directory (tenant) ID; confusing the two is the most common cause of `AADSTS700016`.
+
+The equivalent Microsoft Graph body, which is what the script PATCHes in a single call:
+
+```jsonc
+{
+  "isFallbackPublicClient": true,
+  "publicClient": {
+    "redirectUris": [
+      "http://127.0.0.1/callback",
+      "ms-appx-web://Microsoft.AAD.BrokerPlugin/{clientId}",
+      "msauth.com.anthropic.claudefordesktop://auth"
+    ]
+  },
+  "requiredResourceAccess": [
+    {
+      "resourceAppId": "7d312290-28c8-473c-a0ed-8e53749b6d6d",
+      "resourceAccess": [
+        { "id": "5f1e8914-a52b-429f-9324-91b92b81adaf", "type": "Scope" }
+      ]
+    }
+  ]
+}
+```
+
+`requiredResourceAccess` only *declares* what the app will ask for. Nothing is granted until someone consents.
+
+### Consent — the part that actually blocks people
+
+`user_impersonation` is classified as user-consentable, and most documentation stops there. That classification only applies in a tenant that permits self-service consent. Where an administrator has set **Enterprise applications → Consent and permissions → User consent settings → *Do not allow user consent***, the tenant setting wins and **every** delegated permission requires an admin grant regardless of its own classification.
+
+The symptom is unmistakable and terminal:
+
+> **Need admin approval** — *Claude Desktop - Microsoft Foundry needs permission to access resources in your organisation that only an admin can grant.*
+
+Grant it once, tenant-wide, in any of three ways:
+
+```powershell
+./scripts/New-FoundryAppRegistration.ps1 -GrantAdminConsent   # needs Privileged Role Admin or Global Admin
+az ad app permission admin-consent --id <client-id>
+```
+
+or send an administrator this URL, which needs no tooling and no access to this repo:
+
+```
+https://login.microsoftonline.com/<tenant-id>/adminconsent?client_id=<client-id>
+```
+
+Check whether it has already been granted:
+
+```powershell
+az ad app permission list-grants --id <client-id> -o table
+```
+
+An empty result means no consent exists yet. Until it does, the [key-based scenario](03-claude-code-direct.md#key-based-access-no-entra-app-required) is the way to run the demo — it needs no registration, no consent and no directory admin.
+
+### The second lock: RBAC
+
+Consent lets the user obtain a token. **Cognitive Services User** on the Foundry account is what lets that token call a model:
+
+```powershell
+./scripts/deploy.ps1 -GrantSelfAccess          # grants it to you
+az role assignment create `
+  --assignee <user-or-group-object-id> `
+  --role "Cognitive Services User" `
+  --scope <foundry-account-resource-id>        # grant the demo audience separately
+```
+
+Assign it to a **group**, not to individuals, if more than one person will use the demo. Role assignments can take a minute or two to propagate; a `401` immediately after granting one is usually just that.
+
+### Verifying the registration
+
+```powershell
+$appId = '<client-id>'
+az ad app show --id $appId --query "{
+  publicClient: isFallbackPublicClient,
+  audience:     signInAudience,
+  redirects:    publicClient.redirectUris,
+  permissions:  requiredResourceAccess
+}" -o json
+```
+
+Expect `publicClient: true`, all three redirect URIs, and one `requiredResourceAccess` entry carrying the two GUIDs from the table. If `permissions` is empty, step 3 above did not save.
+
 ## Choosing a topology
 
 | You care most about | Configuration |

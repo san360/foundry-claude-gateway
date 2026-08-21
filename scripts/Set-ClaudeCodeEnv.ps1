@@ -103,8 +103,9 @@ switch ($Auth) {
                 throw @'
 Could not read the Foundry key. If the error mentions disableLocalAuth, keys are off
 on this account. Tenant policy enforces that unless the account carries the
-SecurityControl=Ignore exemption tag, which is only honoured at CREATE time.
-Redeploy with allowLocalAuthExemption = true, or use -Auth Entra.
+SecurityControl=Ignore exemption tag. Redeploy with allowLocalAuthExemption = true -
+the tag is honoured on update as well as on create, so an existing account will flip.
+Otherwise use -Auth Entra.
 '@
             }
             $credential = 'Foundry account API key'

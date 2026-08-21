@@ -27,10 +27,11 @@
                                          and macOS respectively.
       * Cognitive Services user_impersonation (delegated)
                                        - the scope that lets the signed-in user
-                                         call the Foundry data plane. It is a
-                                         user-consentable scope, so a non-admin
-                                         can complete sign-in unnoticed; admin
-                                         consent just suppresses the prompt.
+                                         call the Foundry data plane. Nominally
+                                         user-consentable, but a tenant that
+                                         disables self-service consent overrides
+                                         that and requires an admin grant. See
+                                         -GrantAdminConsent.
 
     Registering all three redirect URIs costs nothing and lets you switch
     -AuthFlow later without touching Entra again.
@@ -42,9 +43,14 @@
     AzureADMyOrg (default) restricts sign-in to this tenant only.
 
 .PARAMETER GrantAdminConsent
-    Pre-consent the delegated scope for the whole tenant so users never see a
-    consent prompt. Requires Privileged Role Administrator or Global
-    Administrator. Skipped automatically if you lack the permission.
+    Consent the delegated scope for the whole tenant. Requires Privileged Role
+    Administrator or Global Administrator, and is skipped with a warning if you
+    lack the permission.
+
+    Treat this as REQUIRED unless you know the tenant allows self-service
+    consent. Where an admin has set 'Do not allow user consent', users cannot
+    approve the scope themselves and sign-in fails with 'Need admin approval'
+    no matter how user-consentable the scope nominally is.
 
 .EXAMPLE
     ./scripts/New-FoundryAppRegistration.ps1
@@ -176,26 +182,43 @@ finally {
 # assignable and consentable. Creating it is harmless if it already exists.
 Invoke-AzQuiet @('ad', 'sp', 'create', '--id', $appId) | Out-Null
 
+$consentUrl = "https://login.microsoftonline.com/$tenantId/adminconsent?client_id=$appId"
+
 if ($GrantAdminConsent) {
     if (Invoke-AzQuiet @('ad', 'app', 'permission', 'admin-consent', '--id', $appId)) {
         Write-Host 'Granted tenant-wide admin consent' -ForegroundColor Green
     }
     else {
-        Write-Host 'Could not grant admin consent - you are not a directory administrator in this tenant.' -ForegroundColor Yellow
-        Write-Host 'Not a blocker: Cognitive Services user_impersonation is user-consentable, so each' -ForegroundColor Yellow
-        Write-Host 'user simply approves it once at first sign-in.' -ForegroundColor Yellow
+        Write-Host ''
+        Write-Host 'Could not grant admin consent - you are not a directory administrator here.' -ForegroundColor Yellow
+        Write-Host 'Whether that blocks you depends on one tenant setting:' -ForegroundColor Yellow
+        Write-Host '  Entra admin centre > Enterprise applications > Consent and permissions' -ForegroundColor Yellow
+        Write-Host 'If user consent is allowed, each user approves the scope at first sign-in and' -ForegroundColor Yellow
+        Write-Host "you are fine. If it is set to 'Do not allow user consent', sign-in will stop at" -ForegroundColor Yellow
+        Write-Host "'Need admin approval' and an administrator must open:" -ForegroundColor Yellow
+        Write-Host "  $consentUrl" -ForegroundColor Yellow
+        Write-Host 'Until then, use -CredentialKind static (key-based). See docs/03 and docs/05.' -ForegroundColor Yellow
     }
+}
+else {
+    Write-Host ''
+    Write-Host 'No admin consent requested. If this tenant disables self-service consent,' -ForegroundColor DarkGray
+    Write-Host "sign-in will stop at 'Need admin approval'. Re-run with -GrantAdminConsent," -ForegroundColor DarkGray
+    Write-Host 'or send an administrator this one-off URL:' -ForegroundColor DarkGray
+    Write-Host "  $consentUrl" -ForegroundColor DarkGray
 }
 
 Write-Host ''
 Write-Host ('{0,-16} {1}' -f 'Client ID:', $appId)
 Write-Host ('{0,-16} {1}' -f 'Tenant ID:', $tenantId)
+Write-Host ('{0,-16} {1}' -f 'Consent URL:', $consentUrl)
 Write-Host ''
 
 # The single object this script emits, so callers can do $reg.ClientId.
 [pscustomobject]@{
-    ClientId = $appId
-    TenantId = $tenantId
-    ObjectId = $objectId
-    Name     = $DisplayName
+    ClientId   = $appId
+    TenantId   = $tenantId
+    ObjectId   = $objectId
+    Name       = $DisplayName
+    ConsentUrl = $consentUrl
 }

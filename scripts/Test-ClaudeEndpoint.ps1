@@ -68,11 +68,13 @@ Could not read the Foundry key.
 If the error mentions "disableLocalAuth is set to be true", API keys are turned off on
 this account. Tenant policy enforces that with an Azure Policy modify effect, which
 overrides the template's disableFoundryLocalAuth = false unless the account carries the
-SecurityControl=Ignore exemption tag. The tag is only honoured at CREATE time. Confirm:
+SecurityControl=Ignore exemption tag. Confirm:
 
   az cognitiveservices account show -n <account> -g <rg> --query "{localAuth:properties.disableLocalAuth,tags:tags}"
 
-Redeploy with allowLocalAuthExemption = true, or re-run this script with -Auth Entra.
+Redeploy with allowLocalAuthExemption = true. The tag is honoured on update as well as
+on create, so an already-hardened account will flip back on the next deployment; only
+if it does not is a delete-and-redeploy needed. Otherwise re-run with -Auth Entra.
 See docs/07-troubleshooting.md.
 '@
             }

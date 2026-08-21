@@ -232,8 +232,10 @@ That does three things:
 Claude Desktop signs the user in with a **public client** app registration that holds a delegated permission on Azure Cognitive Services. `scripts/New-FoundryAppRegistration.ps1` creates it and is idempotent:
 
 ```powershell
-./scripts/New-FoundryAppRegistration.ps1
+./scripts/New-FoundryAppRegistration.ps1 -GrantAdminConsent
 ```
+
+> For the full reference — delegated vs application permissions, the exact GUIDs, the portal click-path for an administrator who will not run a script, the Graph body, and how to verify the result — see [05-entra-authentication.md → The app registration](05-entra-authentication.md#the-app-registration--delegated-access-to-foundry).
 
 It configures:
 
@@ -249,7 +251,22 @@ It configures:
 
 Entra wildcards the **port** of a `127.0.0.1` redirect but not the **path**. A bare `http://127.0.0.1` fails with `AADSTS50011`.
 
-`user_impersonation` on Cognitive Services is a *user-consentable* scope, so an ordinary user can complete the sign-in themselves. `-GrantAdminConsent` is available but optional, and will fail harmlessly if you are not a directory admin.
+`user_impersonation` on Cognitive Services is *nominally* a user-consentable scope, which is why much of the guidance on this says an ordinary user can approve it at first sign-in. That is only true in a tenant that permits self-service consent. Where an administrator has set *Enterprise applications → Consent and permissions → **Do not allow user consent***, the tenant-level setting wins and **every** delegated permission needs an admin grant — the scope's own consent classification stops mattering. Sign-in then dead-ends at *"Need admin approval"*, which no amount of retrying fixes.
+
+So treat `-GrantAdminConsent` as required unless you know self-service consent is on:
+
+```powershell
+# Needs Privileged Role Administrator or Global Administrator.
+./scripts/New-FoundryAppRegistration.ps1 -GrantAdminConsent
+```
+
+If you are not that administrator, send them the consent URL — it needs no tooling and no repo access:
+
+```
+https://login.microsoftonline.com/<tenant-id>/adminconsent?client_id=<client-id>
+```
+
+It is a one-off for the whole tenant. Until it is granted, use the key path below.
 
 Sign-in only gets the user a token. Calling the model still requires the **Cognitive Services User** role on the Foundry account — `deploy.ps1 -GrantSelfAccess` grants it to you; grant it to the demo audience separately.
 

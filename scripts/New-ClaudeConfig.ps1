@@ -28,15 +28,27 @@
                      Claude calls the API Management URL verbatim. Foundry is
                      invisible to the client; APIM holds the Foundry identity.
 
+    Both provider blocks are always written. Claude Desktop namespaces its
+    settings per provider (inferenceFoundryApiKey vs inferenceGatewayApiKey),
+    so the unselected block is inert - which means one .env can describe the
+    whole deployment and -Mode only picks which selector line is set. Switching
+    scenarios afterwards is a two-line edit, not a regeneration.
+
+    The Claude Code variables at the end of the file are the exception: they are
+    process environment variables and there is only one ANTHROPIC_FOUNDRY_API_KEY,
+    so those stay scenario-specific with the alternative commented out.
+
 .PARAMETER Mode
     Direct or Gateway. See above.
 
 .PARAMETER CredentialKind
     interactive - the user signs in to Entra ID from inside Claude. No secret
-                  is written to .env. Recommended, and the only option when
-                  tenant policy disables Foundry local auth.
-    static      - embed a key in .env. Demo-only; the file is gitignored but
-                  the key is still plaintext on disk.
+                  is written to .env.
+    static      - embed keys in .env. Both the Foundry account key and the API
+                  Management subscription key are fetched, so either provider
+                  can be selected afterwards without regenerating. Demo-only:
+                  the file is gitignored but the keys are still plaintext on
+                  disk.
 
 .PARAMETER AuthFlow
     device-code | browser | broker for Direct mode. Gateway mode supports
@@ -158,42 +170,72 @@ else {
     $baseUrl = $o.foundryAnthropicBaseUrl
 }
 
-# --- static credential ----------------------------------------------------
+# --- static credentials ---------------------------------------------------
 
-$apiKey = ''
+# Both keys are fetched, not just the one for -Mode, because Claude Desktop
+# namespaces its settings per provider: inferenceFoundryApiKey and
+# inferenceGatewayApiKey can coexist and the unselected one is ignored. Writing
+# both makes .env a complete description of the deployment, so switching
+# scenarios is an edit to inferenceProvider rather than a regeneration.
+#
+# Keys are only ever fetched for -CredentialKind static. Writing a secret to
+# disk for someone who explicitly asked for interactive sign-in would defeat
+# the point of asking.
+
+$foundryKey = ''
+$gatewayKey = ''
+
 if ($CredentialKind -eq 'static') {
-    if ($Mode -eq 'Gateway') {
+    $foundryKey = az cognitiveservices account keys list --name $o.foundryAccountName `
+        --resource-group $o.resourceGroupName --query key1 -o tsv 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $foundryKey) {
+        $foundryKey = ''
+        $detail = @'
+Could not read a Foundry account key.
+
+If the error mentions disableLocalAuth, keys are switched off on this account.
+Tenant policy enforces that unless the account carries the SecurityControl=Ignore
+exemption tag. Redeploy with allowLocalAuthExemption = true - the tag is honoured
+on update as well as on create, so an existing account will flip. If it does not,
+delete the account and redeploy. Otherwise use -CredentialKind interactive.
+'@
+        # Fatal only when the Foundry key is the credential actually being
+        # selected. In Gateway mode it is a bonus, so degrade instead.
+        if ($Mode -eq 'Direct') { throw $detail }
+        Write-Host ''
+        Write-Host $detail -ForegroundColor Yellow
+        Write-Host 'Continuing: -Mode Gateway does not need it.' -ForegroundColor Yellow
+    }
+
+    if ($o.gatewayAnthropicBaseUrl -and $o.apimName -and $o.gatewaySubscriptionName) {
         $uri = "/subscriptions/$subscriptionId/resourceGroups/$($o.resourceGroupName)" +
         "/providers/Microsoft.ApiManagement/service/$($o.apimName)" +
         "/subscriptions/$($o.gatewaySubscriptionName)/listSecrets?api-version=2024-05-01"
-        $apiKey = az rest --method post --uri $uri --query primaryKey -o tsv
+        $gatewayKey = az rest --method post --uri $uri --query primaryKey -o tsv 2>$null
+        if ($LASTEXITCODE -ne 0 -or -not $gatewayKey) {
+            $gatewayKey = ''
+            if ($Mode -eq 'Gateway') {
+                throw "Could not read the API Management subscription key for '$($o.gatewaySubscriptionName)'. Check that you have rights to listSecrets on $($o.apimName)."
+            }
+            Write-Host ''
+            Write-Host 'Could not read the API Management subscription key; omitting it from .env.' -ForegroundColor Yellow
+        }
 
         # Claude Desktop can send a gateway credential as "Authorization:
         # Bearer" or as "x-api-key" - those are the only two schemes it knows.
         # API Management must therefore be told to look for the subscription
         # key on x-api-key, which is a deployment parameter, not a client one.
-        if ($o.gatewaySubscriptionKeyHeader -and $o.gatewaySubscriptionKeyHeader -ne 'x-api-key') {
+        if ($gatewayKey -and $o.gatewaySubscriptionKeyHeader -and $o.gatewaySubscriptionKeyHeader -ne 'x-api-key') {
             Write-Host ''
             Write-Host "The gateway expects its subscription key on '$($o.gatewaySubscriptionKeyHeader)', but Claude" -ForegroundColor Yellow
             Write-Host "Desktop can only send 'Authorization: Bearer' or 'x-api-key'." -ForegroundColor Yellow
             Write-Host 'Redeploy with gatewaySubscriptionKeyHeader = x-api-key, or use -CredentialKind interactive.' -ForegroundColor Yellow
         }
     }
-    else {
-        $apiKey = az cognitiveservices account keys list --name $o.foundryAccountName `
-            --resource-group $o.resourceGroupName --query key1 -o tsv 2>$null
-        if ($LASTEXITCODE -ne 0 -or -not $apiKey) {
-            throw @'
-Could not read a Foundry key.
-
-If the error mentions disableLocalAuth, keys are switched off on this account.
-Tenant policy enforces that unless the account carries the SecurityControl=Ignore
-exemption tag, and that tag is only honoured at CREATE time. Redeploy with
-allowLocalAuthExemption = true, or use -CredentialKind interactive.
-'@
-        }
-    }
 }
+
+# The key matching the selected provider - what Claude Code and the summary use.
+$apiKey = if ($Mode -eq 'Gateway') { $gatewayKey } else { $foundryKey }
 
 # --- model list -----------------------------------------------------------
 
@@ -244,7 +286,11 @@ function Add-Setting {
 
 Add-Line '# Claude on Microsoft Foundry - generated by scripts/New-ClaudeConfig.ps1'
 Add-Line "# Generated : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz')"
-Add-Line "# Scenario  : $Mode"
+Add-Line "# Active    : $Mode + $CredentialKind"
+Add-Line '#'
+Add-Line '# Both providers are described in this file. The two selector lines'
+Add-Line '# inferenceProvider and inferenceCredentialKind decide which combination is'
+Add-Line '# live for Claude Desktop; everything else is ignored until selected.'
 Add-Line '#'
 Add-Line '# Gitignored. Regenerate freely; do not hand-edit deployment-derived values.'
 Add-Line '# Apply with: ./scripts/Set-ClaudeDesktopConfig.ps1'
@@ -277,19 +323,61 @@ Add-Line '# How long a sign-in stays valid under your IdP session policy.'
 Add-Setting 'inferenceSessionLifetimeSec' $SessionLifetimeSeconds
 Add-Line ''
 
-if ($Mode -eq 'Gateway') {
-    Add-Line '# --- Gateway provider ---'
+Add-Line '# Both provider blocks are written. inferenceProvider above selects which'
+Add-Line '# one is live; Claude Desktop ignores the other. Switching scenario is an'
+Add-Line '# edit to these two selector lines, not a regeneration.'
+Add-Line ''
+
+Add-Line '# --- Foundry provider (inferenceProvider=foundry) ---'
+Add-Line '# Resource name; Claude constructs the endpoint URL from it.'
+Add-Setting 'inferenceFoundryResource' $o.foundryAccountName
+Add-Line ''
+Add-Line '# Directory (tenant) ID of the app registration that holds the'
+Add-Line '# Cognitive Services scope.'
+Add-Setting 'inferenceFoundryTenantId' $TenantId
+Add-Line ''
+Add-Line '# Application (client) ID of that registration. NOT the tenant ID.'
+if (-not $ClientId) {
+    Add-Line '# Empty: no -ClientId was supplied. Required before inferenceCredentialKind'
+    Add-Line '# can be switched to interactive.'
+}
+Add-Setting 'inferenceFoundryClientId' $ClientId
+Add-Line ''
+Add-Line '# device-code | browser | broker'
+Add-Setting 'inferenceFoundryAuthFlow' $AuthFlow
+Add-Line ''
+if ($foundryKey) {
+    Add-Line '# Foundry account key, used only when inferenceCredentialKind=static.'
+    Add-Line '# Shared across every caller and not individually revocable - rotating it'
+    Add-Line '# cuts off everyone. The gateway key below is the better key story.'
+}
+else {
+    Add-Line '# Empty under interactive sign-in, which is the point.'
+}
+Add-Setting 'inferenceFoundryApiKey' $foundryKey
+Add-Line ''
+
+if ($o.gatewayAnthropicBaseUrl) {
+    Add-Line '# --- Gateway provider (inferenceProvider=gateway) ---'
     Add-Line '# Full gateway URL, including the /anthropic suffix.'
-    Add-Setting 'inferenceGatewayBaseUrl' $baseUrl
+    Add-Setting 'inferenceGatewayBaseUrl' $o.gatewayAnthropicBaseUrl
     Add-Line ''
-    if ($CredentialKind -eq 'static') {
-        Add-Line '# API Management subscription key, sent as the x-api-key header.'
-        Add-Setting 'inferenceGatewayApiKey' $apiKey
+
+    if ($gatewayKey) {
+        Add-Line '# API Management subscription key, used only when'
+        Add-Line '# inferenceCredentialKind=static. Per-consumer, individually revocable,'
+        Add-Line '# and it grants nothing on Foundry itself.'
+        Add-Line '# bearer | x-api-key are the only two schemes Claude Desktop can send,'
+        Add-Line '# so APIM is configured to read its subscription key from x-api-key.'
+        Add-Setting 'inferenceGatewayApiKey' $gatewayKey
         Add-Setting 'inferenceGatewayAuthScheme' 'x-api-key'
+        Add-Line ''
     }
-    else {
-        Add-Line '# Entra ID sign-in. Claude mints an access token for the audience the'
-        Add-Line '# gateway validates and sends it as Authorization: Bearer.'
+
+    if ($ClientId) {
+        Add-Line '# Entra ID sign-in, used only when inferenceCredentialKind=interactive.'
+        Add-Line '# Claude mints an access token for the audience the gateway validates'
+        Add-Line '# and sends it as Authorization: Bearer.'
         Add-Line '# The gateway must validate iss AND aud - a signature check alone'
         Add-Line '# would accept any token from the tenant. The APIM policy does both.'
 
@@ -332,28 +420,13 @@ if ($Mode -eq 'Gateway') {
             scopes    = @("$GatewayAudience/.default")
         } | ConvertTo-Json -Compress
         Add-Setting 'inferenceGatewayOidc' $oidc
+
+        # Device code is a Foundry-provider flow; the gateway provider knows
+        # only browser and broker.
         Add-Setting 'inferenceGatewayOidcAuthFlow' $(if ($AuthFlow -eq 'broker') { 'broker' } else { 'browser' })
+        Add-Line ''
     }
 }
-else {
-    Add-Line '# --- Foundry provider ---'
-    Add-Line '# Resource name; Claude constructs the endpoint URL from it.'
-    Add-Setting 'inferenceFoundryResource' $o.foundryAccountName
-    Add-Line ''
-    Add-Line '# Directory (tenant) ID of the app registration that holds the'
-    Add-Line '# Cognitive Services scope.'
-    Add-Setting 'inferenceFoundryTenantId' $TenantId
-    Add-Line ''
-    Add-Line '# Application (client) ID of that registration. NOT the tenant ID.'
-    Add-Setting 'inferenceFoundryClientId' $ClientId
-    Add-Line ''
-    Add-Line '# device-code | browser | broker'
-    Add-Setting 'inferenceFoundryAuthFlow' $AuthFlow
-    Add-Line ''
-    Add-Line '# Empty under interactive sign-in, which is the point.'
-    Add-Setting 'inferenceFoundryApiKey' $apiKey
-}
-Add-Line ''
 Add-Line '# Model picker contents. "name" is the Foundry deployment name and the'
 Add-Line '# first entry is the default.'
 Add-Setting 'inferenceModels' $modelJson
@@ -368,17 +441,34 @@ Add-Line ''
 
 Add-Line '# ---------------------------------------------------------------------'
 Add-Line '# Claude Code (CLI)'
+Add-Line '#'
+Add-Line '# Unlike the Claude Desktop settings above, these are process environment'
+Add-Line "# variables and they collide: there is one ANTHROPIC_FOUNDRY_API_KEY, not"
+Add-Line '# one per provider. Only the selected scenario is live; the alternative is'
+Add-Line '# commented out directly beneath it.'
 Add-Line '# ---------------------------------------------------------------------'
 Add-Setting 'CLAUDE_CODE_USE_FOUNDRY' '1'
+Add-Line ''
 if ($Mode -eq 'Gateway') {
     Add-Line '# Gateway: the base URL must already include /anthropic.'
     Add-Setting 'ANTHROPIC_FOUNDRY_BASE_URL' $baseUrl
+    if ($gatewayKey) { Add-Setting 'ANTHROPIC_FOUNDRY_API_KEY' $gatewayKey }
+    Add-Line ''
+    Add-Line '# Direct instead: comment the two lines above and uncomment these.'
+    Add-Line "# ANTHROPIC_FOUNDRY_RESOURCE=$($o.foundryAccountName)"
+    if ($foundryKey) { Add-Line "# ANTHROPIC_FOUNDRY_API_KEY=$foundryKey" }
 }
 else {
     Add-Line '# Direct: Claude Code appends /anthropic to the resource name itself.'
     Add-Setting 'ANTHROPIC_FOUNDRY_RESOURCE' $o.foundryAccountName
+    if ($foundryKey) { Add-Setting 'ANTHROPIC_FOUNDRY_API_KEY' $foundryKey }
+    if ($o.gatewayAnthropicBaseUrl) {
+        Add-Line ''
+        Add-Line '# Gateway instead: comment the two lines above and uncomment these.'
+        Add-Line "# ANTHROPIC_FOUNDRY_BASE_URL=$($o.gatewayAnthropicBaseUrl)"
+        if ($gatewayKey) { Add-Line "# ANTHROPIC_FOUNDRY_API_KEY=$gatewayKey" }
+    }
 }
-if ($apiKey) { Add-Setting 'ANTHROPIC_FOUNDRY_API_KEY' $apiKey }
 Add-Line ''
 Add-Line '# Pin every model. Foundry performs no startup model check, so an'
 Add-Line '# unpinned alias fails at the first request rather than at launch.'
@@ -399,6 +489,8 @@ Write-Host ('{0,-20} {1}' -f 'Sign-in flow:', $AuthFlow)
 Write-Host ('{0,-20} {1}' -f 'Tenant ID:', $TenantId)
 Write-Host ('{0,-20} {1}' -f 'Client ID:', $(if ($ClientId) { $ClientId } else { '(none - static credential)' }))
 Write-Host ('{0,-20} {1}' -f 'Models:', ($models -join ', '))
+Write-Host ('{0,-20} {1}' -f 'Foundry key:', $(if ($foundryKey) { 'written' } else { 'not written' }))
+Write-Host ('{0,-20} {1}' -f 'Gateway key:', $(if ($gatewayKey) { 'written' } else { 'not written' }))
 Write-Host ''
 
 if ($Apply) {
