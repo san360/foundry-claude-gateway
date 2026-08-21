@@ -88,6 +88,8 @@ claude
 
 # 4b. If your tenant blocks user consent ("Need admin approval"), use the
 #     key credential instead. No app registration, no consent, no admin.
+#     This writes BOTH the Foundry and the gateway key, so switching to the
+#     gateway afterwards is an edit to inferenceProvider in .env.
 ./scripts/New-ClaudeConfig.ps1 -Mode Direct -CredentialKind static -Apply
 ```
 
@@ -125,7 +127,7 @@ scripts/
   Test-ClaudeEndpoint.ps1        smoke test either path, either credential
   Set-GatewayAuthMode.ps1        switch auth topology live, without redeploying
   New-FoundryAppRegistration.ps1 create the Entra public-client app (idempotent)
-  New-ClaudeConfig.ps1           write .env for either scenario, optionally apply
+  New-ClaudeConfig.ps1           write .env describing both providers, optionally apply
   Set-ClaudeDesktopConfig.ps1    apply .env to Claude Desktop; export reg/plist/JSON
 .env.example                     annotated reference for every client setting
 samples/
