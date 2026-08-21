@@ -229,6 +229,41 @@ Accepting a second audience is safe **only under `backendAuthMode = 'managedIden
 
 Also remember `subscriptionRequired` must be off whenever Entra is a permitted client credential — APIM rejects the request on the missing key before your policy ever runs.
 
+### Key-based access at the gateway
+
+The gateway's key scenario uses an **API Management subscription key**, not the Foundry key. The gateway keeps its own managed-identity credential to Foundry, so the caller never holds a Foundry secret — which is one of the better arguments for putting a gateway in front of the model in the first place.
+
+```powershell
+./scripts/New-ClaudeConfig.ps1 -Mode Gateway -CredentialKind static -EnvFile .env.gateway
+./scripts/Set-ClaudeDesktopConfig.ps1 -EnvFile .env.gateway
+```
+
+That writes:
+
+```
+inferenceCredentialKind=static
+inferenceGatewayApiKey=<APIM subscription key>
+inferenceGatewayAuthScheme=x-api-key
+```
+
+**The header has to match.** Claude Desktop can send a gateway credential in exactly two ways — `Authorization: Bearer` or `x-api-key` — so API Management must be told to look for its subscription key on `x-api-key`. That is a deployment parameter, not a client one:
+
+```bicep
+param gatewaySubscriptionKeyHeader = 'x-api-key'   // the default in this repo
+```
+
+It also happens to be the header the Foundry Anthropic endpoint itself expects, so one header name works across both scenarios. If you change it to something else, Claude Desktop's key path stops working and `New-ClaudeConfig.ps1` will warn you.
+
+Compared with the Foundry key on the direct path, the gateway key is the better key story: it is per-consumer, revocable on its own, rate-limited by the product's token budget, and it never grants access to Foundry itself.
+
+| | Direct + Foundry key | Gateway + APIM key |
+|---|---|---|
+| Secret held by the client | Foundry account key | APIM subscription key |
+| Blast radius if leaked | full account, all callers | that one subscription |
+| Revoke without affecting others | no — key rotation hits everyone | yes — delete the subscription |
+| Token budget / quota | none | `llm-token-limit` per subscription |
+| Usage attribution | none | per subscription, in Application Insights |
+
 ## Same thing from the SDK
 
 ```python

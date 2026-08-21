@@ -56,6 +56,7 @@ param apimPublisherName = 'Contoso'
 param gatewayClientAuthMode = 'either'     // subscriptionKey | entra | either
 param gatewayBackendAuthMode = 'managedIdentity'  // managedIdentity | passthrough
 param disableFoundryLocalAuth = false      // flip to true for the keyless demo
+param allowLocalAuthExemption = true       // SecurityControl=Ignore; without it, policy forces keys off
 ```
 
 Full parameter reference:
@@ -76,6 +77,7 @@ Full parameter reference:
 | `principalId` | `''` | Object ID granted `Cognitive Services User` |
 | `principalType` | `User` | `User`, `ServicePrincipal` or `Group` |
 | `disableFoundryLocalAuth` | `false` | Turns off Foundry API keys entirely |
+| `allowLocalAuthExemption` | `true` | Tags every resource `SecurityControl=Ignore`. Tenant policy forces `disableLocalAuth = true` on Cognitive Services accounts without this tag, which makes the key-based scenarios undeployable. Demo only — never set it on production. |
 | `deployGateway` | `true` | Set `false` for a direct-path-only deployment |
 | `apimSkuName` | `BasicV2` | `BasicV2`, `StandardV2`, `PremiumV2` |
 | `apimSkuCapacity` | `1` | Scale units |
@@ -85,7 +87,7 @@ Full parameter reference:
 | `gatewayEntraAudience` | `https://ai.azure.com` | Expected `aud` claim |
 | `foundryTokenResource` | `https://ai.azure.com` | Resource the gateway MI requests |
 | `gatewayTokensPerMinute` | `20000` | Per-caller TPM budget before 429 |
-| `gatewaySubscriptionKeyHeader` | `api-key` | Header carrying the APIM subscription key |
+| `gatewaySubscriptionKeyHeader` | `x-api-key` | Header carrying the APIM subscription key. `x-api-key` is Anthropic's own convention, is what the Foundry Anthropic endpoint expects, and is one of only two schemes Claude Desktop can send — so one header name works everywhere. |
 | `gatewayBodyLogBytes` | `8192` | Bytes of request/response body logged to Application Insights. `0` disables it. |
 
 ## Deploy

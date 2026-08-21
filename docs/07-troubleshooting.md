@@ -52,7 +52,27 @@ az cognitiveservices account show -n <account> -g <rg> `
   --query properties.disableLocalAuth
 ```
 
-If it returns `true`, API keys are permanently unavailable on that account and every key-based call returns `401`. This is not a defect — take the Entra path, which is the recommended configuration anyway:
+If it returns `true`, API keys are unavailable on that account and every key-based call returns `401`.
+
+**The fix: tag the account `SecurityControl=Ignore`.** That is the tenant's own exemption tag, and the policy skips any resource carrying it. The template applies it by default:
+
+```bicep
+// infra/main.bicepparam
+param allowLocalAuthExemption = true   // adds SecurityControl=Ignore to every resource
+param disableFoundryLocalAuth = false
+```
+
+Verify what landed:
+
+```powershell
+az cognitiveservices account show -n <account> -g <rg> `
+  --query "{localAuth:properties.disableLocalAuth, tags:tags}"
+# expected: localAuth = false, tags.SecurityControl = "Ignore"
+```
+
+> **The tag is evaluated at create *and* update.** Redeploying an already-hardened account with the tag does flip `disableLocalAuth` back to `false` — verified on this deployment, where an account created without the tag went from `true` to `false` on the next `deploy.ps1` run. If yours does not flip, the account predates the tag and the safest fix is to delete the resource group and redeploy; that also gets you a clean set of model deployments.
+
+Do not set this on a production workload. It is a demo exemption, and the Entra path remains the recommended configuration:
 
 - Direct: unset `ANTHROPIC_FOUNDRY_API_KEY` and let Claude Code use `DefaultAzureCredential`, or supply `ANTHROPIC_FOUNDRY_AUTH_TOKEN`. See [03-claude-code-direct.md](03-claude-code-direct.md).
 - Gateway: keep `gatewayBackendAuthMode = 'managedIdentity'` (the default). A `passthrough` backend cannot work against a key-disabled account unless the caller presents an Entra token.
@@ -62,6 +82,18 @@ A telltale sign in the deployment list is a system-injected `PolicyDeployment_<d
 ```powershell
 az deployment group list -g <rg> --query "[].name" -o tsv
 ```
+
+### `401` with a valid Foundry key on the direct path
+
+Wrong header. The **Anthropic** surface of a Foundry account expects Anthropic's own `x-api-key`; it rejects `api-key` and `Ocp-Apim-Subscription-Key` with the misleading message *"Access denied due to invalid subscription key or wrong API endpoint"*. The Azure OpenAI surface of the *same* account does accept `api-key`, which is where the confusion comes from.
+
+```powershell
+# works
+curl -X POST "https://<account>.services.ai.azure.com/anthropic/v1/messages" `
+  -H "x-api-key: <key>" -H "anthropic-version: 2023-06-01" ...
+```
+
+Claude Code and Claude Desktop set the header for you — this only bites when hand-rolling a request. The gateway's subscription key header now defaults to `x-api-key` for the same reason.
 
 ### `The model 'claude-...' is not available in region '...'`
 
@@ -268,6 +300,38 @@ The tenant ID was typed into the **Client ID** box. Anthropic's own documentatio
 - `inferenceFoundryClientId` — the **application (client) ID** of the app registration.
 
 `Set-ClaudeDesktopConfig.ps1` refuses to write a config where the two are equal.
+
+### `Need admin approval` — "Claude Desktop - Microsoft Foundry needs permission to access resources in your organisation that only an admin can grant"
+
+Verified failure mode, and the reason this repo supports key-based auth as a first-class scenario.
+
+The app registration requests delegated `user_impersonation` on Azure Cognitive Services. That scope is nominally user-consentable, but many tenants disable self-service consent outright (*Enterprise applications → Consent and permissions → Do not allow user consent*). When they do, **every** delegated permission needs an admin grant, regardless of the scope's own consent setting. If you are not a directory admin, you cannot proceed on the Entra path.
+
+Three options, in order of practicality:
+
+1. **Use the key scenario instead.** No app registration, no consent, no directory admin:
+
+   ```powershell
+   ./scripts/New-ClaudeConfig.ps1 -Mode Direct -CredentialKind static -Apply
+   ```
+
+   This needs `disableLocalAuth = false` on the Foundry account — see the `SecurityControl=Ignore` entry above.
+
+2. **Ask a Global Administrator or Cloud Application Administrator to grant consent once**, then Entra works for every user in the tenant:
+
+   ```powershell
+   ./scripts/New-FoundryAppRegistration.ps1 -GrantAdminConsent
+   ```
+
+   Or send them the admin consent URL:
+
+   ```
+   https://login.microsoftonline.com/<tenant-id>/adminconsent?client_id=<app-client-id>
+   ```
+
+3. **Use Claude Code instead of Claude Desktop for the Entra demo.** The CLI authenticates as a Microsoft first-party client through `az login`, so it needs no app registration and no consent at all. This is why `Test-ClaudeEndpoint.ps1 -Auth Entra` succeeds while the desktop app is still blocked.
+
+Note that consent is only half the story. Even after an admin grants it, the user still needs the **Cognitive Services User** role on the Foundry account, or every call returns `403`.
 
 ### `AADSTS50011: The redirect URI specified in the request does not match`
 

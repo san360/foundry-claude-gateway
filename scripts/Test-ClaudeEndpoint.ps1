@@ -66,15 +66,20 @@ switch ($Auth) {
 Could not read the Foundry key.
 
 If the error mentions "disableLocalAuth is set to be true", API keys are turned off on
-this account. Many enterprise tenants enforce that with an Azure Policy modify effect,
-which overrides the template's disableFoundryLocalAuth = false. Confirm with:
+this account. Tenant policy enforces that with an Azure Policy modify effect, which
+overrides the template's disableFoundryLocalAuth = false unless the account carries the
+SecurityControl=Ignore exemption tag. The tag is only honoured at CREATE time. Confirm:
 
-  az cognitiveservices account show -n <account> -g <rg> --query properties.disableLocalAuth
+  az cognitiveservices account show -n <account> -g <rg> --query "{localAuth:properties.disableLocalAuth,tags:tags}"
 
-Re-run this script with -Auth Entra. See docs/07-troubleshooting.md.
+Redeploy with allowLocalAuthExemption = true, or re-run this script with -Auth Entra.
+See docs/07-troubleshooting.md.
 '@
             }
-            $headers['api-key'] = $key
+            # The Anthropic surface expects Anthropic's own header. 'api-key',
+            # which the Azure OpenAI surface of the same account accepts, is
+            # rejected here with a 401.
+            $headers['x-api-key'] = $key
         }
         else {
             $subId = az account show --query id -o tsv

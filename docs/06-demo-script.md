@@ -174,6 +174,33 @@ This is the strongest moment. Nothing is redeployed.
 
 > "429 with `Retry-After`. Per-caller, enforced at the edge, before the spend."
 
+## Act 5b — The other credential: API keys (3 min, optional)
+
+Run this when the audience asks "what if we can't use Entra?" — a common reality when a tenant blocks user consent, or when the caller is a machine that cannot hold a managed identity.
+
+```powershell
+# Direct, with the Foundry account key
+./scripts/Test-ClaudeEndpoint.ps1 -Mode Direct -Auth Key
+
+# Gateway, with an API Management subscription key
+./scripts/Test-ClaudeEndpoint.ps1 -Mode Gateway -Auth Key
+```
+
+> "Both return 200, so keys work on both paths. But look at what the client is actually holding. On the direct path it is the Foundry account key — one shared secret, full access, and rotating it breaks every caller at once. Through the gateway it is a subscription key scoped to that one consumer: I can revoke it on its own, meter it on its own, and it grants nothing on Foundry, because the gateway still calls the model with its own managed identity."
+
+Show the setting that made this possible at all:
+
+```powershell
+az cognitiveservices account show -n <account> -g <rg> `
+  --query "{localAuth:properties.disableLocalAuth, tags:tags}"
+```
+
+> "Tenant policy turns API keys off on every Cognitive Services account. This one is tagged `SecurityControl=Ignore`, which is the exemption — that is the only reason the key demo runs. In your own tenant, that tag is a conversation with your security team, and the honest answer is that Entra is the better default anyway."
+
+Then bring it back to Claude Desktop:
+
+> "This also matters for the desktop app. Claude Code signs in as a Microsoft first-party client, so `az login` is enough. Claude Desktop needs its own app registration, and if your tenant blocks user consent, that sign-in stops dead at 'Need admin approval'. The key path is what unblocks a demo on the day; the admin grant is what you want for the rollout."
+
 ## Act 6 — Close (1 min)
 
 | | Direct | Gateway |
@@ -182,6 +209,7 @@ This is the strongest moment. Nothing is redeployed.
 | Latency | lowest | one extra hop |
 | Entra auth | ✓ | ✓ (two topologies) |
 | Keyless | ✓ | ✓ |
+| Key auth, if you need it | shared account key | per-consumer, revocable |
 | Per-caller quota | ✗ | ✓ |
 | Cost attribution | ✗ | ✓ |
 | Central policy | ✗ | ✓ |

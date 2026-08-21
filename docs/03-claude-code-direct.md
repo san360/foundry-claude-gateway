@@ -99,7 +99,9 @@ $env:ANTHROPIC_FOUNDRY_API_KEY = (az cognitiveservices account keys list `
   --name <account> --resource-group <rg> --query key1 -o tsv)
 ```
 
-If `disableFoundryLocalAuth = true` was deployed, this returns a key that the service will refuse. That is the point of that switch — it proves the Entra path is genuinely keyless.
+This requires `disableLocalAuth = false` on the account. Tenant policy forces it to `true` unless the resource is tagged `SecurityControl=Ignore`, which the template applies via `allowLocalAuthExemption = true`. Deploying with `disableFoundryLocalAuth = true` turns keys off deliberately — that switch exists to prove the Entra path is genuinely keyless.
+
+Note the header: the **Anthropic** surface expects Anthropic's own `x-api-key` and returns `401` for `api-key`, even though the Azure OpenAI surface of the same account accepts `api-key`. Claude Code sets the header for you; this only matters when hand-rolling a request.
 
 ### Explicit bearer token
 
@@ -193,6 +195,14 @@ If the app registration already exists, pass it instead of creating a second one
 ./scripts/New-ClaudeConfig.ps1 -Mode Direct -ClientId <app-client-id> -Apply
 ```
 
+**If your tenant blocks user consent**, the sign-in stops at *"Need admin approval — Claude Desktop - Microsoft Foundry needs permission to access resources in your organisation that only an admin can grant."* Either have an admin run `New-FoundryAppRegistration.ps1 -GrantAdminConsent` once, or take the key path, which needs no app registration, no consent and no directory admin:
+
+```powershell
+./scripts/New-ClaudeConfig.ps1 -Mode Direct -CredentialKind static -Apply
+```
+
+Both produce the same `.env` shape; only the credential differs. See [key-based access](#key-based-access-no-entra-app-required) below.
+
 That does three things:
 
 1. reads `.deployment-outputs.json` and writes an annotated `.env` (gitignored — see `.env.example` for the committed reference),
@@ -242,6 +252,51 @@ Entra wildcards the **port** of a `127.0.0.1` redirect but not the **path**. A b
 `user_impersonation` on Cognitive Services is a *user-consentable* scope, so an ordinary user can complete the sign-in themselves. `-GrantAdminConsent` is available but optional, and will fail harmlessly if you are not a directory admin.
 
 Sign-in only gets the user a token. Calling the model still requires the **Cognitive Services User** role on the Foundry account — `deploy.ps1 -GrantSelfAccess` grants it to you; grant it to the demo audience separately.
+
+### Key-based access, no Entra app required
+
+This is the second credential scenario, and the fallback when the tenant will not consent to the app registration. It is deliberately kept alongside the Entra path rather than replacing it — both are worth demonstrating.
+
+```powershell
+./scripts/New-ClaudeConfig.ps1 -Mode Direct -CredentialKind static -Apply
+```
+
+The script reads the live key out of Azure and writes it to `.env`, which is gitignored. Nothing else changes: same endpoint, same models, same profile.
+
+| Setting | Entra | API key |
+|---|---|---|
+| `inferenceCredentialKind` | `interactive` | `static` |
+| `inferenceFoundryClientId` | required | not used |
+| `inferenceFoundryAuthFlow` | required | not used |
+| `inferenceFoundryApiKey` | empty | the account key |
+| App registration | required | none |
+| Admin consent | required if the tenant blocks user consent | none |
+| RBAC role assignment | **Cognitive Services User**, per user | none |
+| Revocation | disable the user, or remove the role | rotate the key, which affects everyone |
+| Audit trail | per-user identity in sign-in logs | the key only |
+
+**The prerequisite.** Keys work only when the Foundry account has `disableLocalAuth = false`. Tenant policy forces it to `true` on every Cognitive Services account unless the resource carries the `SecurityControl=Ignore` exemption tag, which the template applies:
+
+```bicep
+// infra/main.bicepparam
+param allowLocalAuthExemption = true   // tags every resource SecurityControl=Ignore
+param disableFoundryLocalAuth = false
+```
+
+Verify what actually landed — the policy overrides the template silently, and ARM still reports `Succeeded`:
+
+```powershell
+az cognitiveservices account show -n <account> -g <rg> `
+  --query "{localAuth:properties.disableLocalAuth, tags:tags}"
+```
+
+`localAuth` must be `false`. If it is `true`, redeploy; if it stays `true`, the account predates the tag — delete the resource group and deploy fresh.
+
+**Handle the key properly.** It is a bearer credential with no user identity, no expiry and no per-user revocation:
+
+- `.env`, `.env.*` and `out/` are gitignored. Keep it that way; the exported `.reg`, `.plist` and managed-settings JSON contain the key in clear text.
+- Rotate with `az cognitiveservices account keys regenerate --key-name key1`, then re-run the generator.
+- For anything beyond a demo, put the key in Key Vault and use Entra for humans. Keys are for the demo and for machine callers that cannot hold a managed identity.
 
 ### Rolling it out to a fleet
 

@@ -1,12 +1,14 @@
 # 05 — Microsoft Entra ID authentication
 
 > **Short answer to "can we use Entra for both scenarios?" — Yes, for both, and in the gateway case in two different topologies. Neither path requires an API key at any point. You can deploy this template with `disableFoundryLocalAuth = true` and have no usable key anywhere in the system.**
+>
+> **Key-based access is supported too**, as a deliberate second credential scenario rather than a fallback of last resort. It matters because a hardened tenant may refuse consent for the app registration that Claude *Desktop* needs, and because some machine callers cannot hold a managed identity. Both credentials are demonstrated side by side; see [03](03-claude-code-direct.md) and [04](04-claude-code-gateway.md).
 
 ## The matrix
 
 | # | Path | Client credential | Gateway → Foundry credential | Foundry sees | Supported |
 | --- | --- | --- | --- | --- | --- |
-| 1 | Direct | Foundry API key | — | shared key | ✓ |
+| 1 | Direct | Foundry API key | — | shared key | ✓ needs `SecurityControl=Ignore` |
 | 2 | **Direct** | **Entra token (`DefaultAzureCredential`)** | — | **the end user** | **✓ recommended** |
 | 3 | Direct | Entra token (`ANTHROPIC_FOUNDRY_AUTH_TOKEN`) | — | the end user / SPN | ✓ |
 | 4 | Gateway | APIM subscription key | gateway managed identity | the gateway | ✓ |
@@ -14,7 +16,7 @@
 | 6 | Gateway | Entra token, validated at the edge | same token passed through | **the end user** | ✓ |
 | 7 | Gateway | APIM subscription key | passthrough | *(no bearer token)* | ✗ invalid combination |
 
-Rows 2, 5 and 6 are entirely key-free.
+Rows 2, 5 and 6 are entirely key-free. Row 4 is the best of the key-based options: the client holds a per-consumer, individually revocable gateway key and never sees a Foundry credential.
 
 ## Scenario A — Direct: Claude Code → Foundry with Entra
 
@@ -217,7 +219,7 @@ Check that `aud` matches `{{entra-audience}}` and `tid` matches `{{entra-tenant-
 
 Executed 2026-08-20 against a Foundry account in `eastus2` with `claude-haiku-4-5` (version `2`).
 
-### Direct path, Entra token � confirmed working
+### Direct path, Entra token � confirmed working
 
 ```powershell
 $tok = az account get-access-token --resource https://ai.azure.com --query accessToken -o tsv
@@ -248,17 +250,38 @@ Three things this proves:
 
 Two request-shaping notes that cost real debugging time:
 
-- Send the body from a **file** (`-d "@file"`), not an inline string. PowerShell mangles the embedded quotes of an inline JSON literal and Foundry replies `400 Request body could not be parsed as JSON` � which is easily misread as an auth problem.
+- Send the body from a **file** (`-d "@file"`), not an inline string. PowerShell mangles the embedded quotes of an inline JSON literal and Foundry replies `400 Request body could not be parsed as JSON` � which is easily misread as an auth problem.
 - `anthropic-version: 2023-06-01` is mandatory. Omitting it is also a `400`.
 
-### Keys were not merely unused � they were unavailable
+### Keys were blocked by policy, and how the block was lifted
 
-On the tenant used for this validation, `az cognitiveservices account keys list` failed:
+On the tenant used for this validation, `az cognitiveservices account keys list` initially failed:
 
 ```
 (BadRequest) Failed to list key. disableLocalAuth is set to be true
 ```
 
-even though the template deployed `disableFoundryLocalAuth = false`. An Azure Policy `modify` effect had rewritten the property after ARM accepted the request, and all three key-based calls (`api-key`, `x-api-key`, and no credential) returned `401`.
+even though the template deployed `disableFoundryLocalAuth = false`. An Azure Policy `modify` effect had rewritten the property after ARM accepted the request, and every key-based call returned `401`.
 
-This is a useful demo result rather than an obstacle: it shows the Entra path is the one that survives a hardened enterprise tenant, and it means `gatewayBackendAuthMode = 'managedIdentity'` is not just the recommended default but the only viable backend setting on such a subscription. See [07-troubleshooting.md](07-troubleshooting.md).
+**The exemption tag lifts it.** Tagging the account `SecurityControl=Ignore` takes it out of the policy's scope, and `disableLocalAuth` stays at the value the template asked for. The template applies the tag by default:
+
+```bicep
+param allowLocalAuthExemption = true   // SecurityControl=Ignore on every resource
+param disableFoundryLocalAuth = false
+```
+
+Redeploying an account that the policy had already hardened flipped `disableLocalAuth` from `true` back to `false`, and `keys list` then returned a working key. Confirmed on this deployment.
+
+Two lessons worth keeping:
+
+1. **The policy overrides the template silently.** ARM reports `Succeeded` with the value you asked for while the live resource holds the opposite. Always verify the resource, not the deployment:
+
+   ```powershell
+   az cognitiveservices account show -n <account> -g <rg> `
+     --query "{localAuth:properties.disableLocalAuth, tags:tags}"
+   ```
+
+2. **The Anthropic surface wants `x-api-key`.** With local auth enabled, `x-api-key` returns `200` while `api-key` and `Ocp-Apim-Subscription-Key` return `401` with a message about an invalid subscription key — misleading, because the key is fine and the header is not. The Azure OpenAI surface of the same account is the opposite way round, which is where the confusion comes from.
+
+None of this changes the recommendation. Entra remains the right default: it carries a user identity into the sign-in logs, is revocable per user, and needs no secret on the client. The key path exists because a hardened tenant may block user consent for the app registration entirely (see the *Need admin approval* entry in [07-troubleshooting.md](07-troubleshooting.md)), and because `gatewayBackendAuthMode = 'managedIdentity'` keeps the *backend* keyless regardless of how the client authenticated.
+

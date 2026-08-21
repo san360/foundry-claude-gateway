@@ -184,9 +184,12 @@ if ($CredentialKind -eq 'static') {
             --resource-group $o.resourceGroupName --query key1 -o tsv 2>$null
         if ($LASTEXITCODE -ne 0 -or -not $apiKey) {
             throw @'
-Could not read a Foundry key. If the error mentions disableLocalAuth, keys are
-switched off on this account (commonly by tenant policy) and -CredentialKind
-static is unavailable. Use -CredentialKind interactive.
+Could not read a Foundry key.
+
+If the error mentions disableLocalAuth, keys are switched off on this account.
+Tenant policy enforces that unless the account carries the SecurityControl=Ignore
+exemption tag, and that tag is only honoured at CREATE time. Redeploy with
+allowLocalAuthExemption = true, or use -CredentialKind interactive.
 '@
         }
     }

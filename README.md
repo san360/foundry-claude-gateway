@@ -5,7 +5,14 @@ An end-to-end, deployable demonstration of **Anthropic Claude models running in 
 1. **Direct** — Claude Code (and any Anthropic SDK client) calls the Foundry Anthropic endpoint.
 2. **Via the AI gateway** — the same clients call **Azure API Management**, which fronts Foundry with token governance, per-caller quotas, telemetry and centralized identity.
 
-Both paths support **Microsoft Entra ID authentication with no API keys at all**. See [docs/05-entra-authentication.md](docs/05-entra-authentication.md) for the full matrix and the caveats.
+Both paths support **Microsoft Entra ID authentication with no API keys at all**, and both also support **API key authentication** as a second, independently demonstrable credential scenario — four combinations in total. See [docs/05-entra-authentication.md](docs/05-entra-authentication.md) for the full matrix and the caveats.
+
+|  | Direct to Foundry | Via the AI gateway |
+|---|---|---|
+| **Entra ID** | user's own token, RBAC-enforced | token validated at the edge, gateway calls Foundry with its managed identity |
+| **API key** | Foundry account key | per-consumer APIM subscription key; the client never holds a Foundry secret |
+
+Key auth needs `disableLocalAuth = false`, which tenant policy permits only on resources tagged `SecurityControl=Ignore` — applied by default via `allowLocalAuthExemption`. Entra remains the recommended credential; keys exist because a hardened tenant may block the consent that Claude *Desktop*'s app registration requires.
 
 ```mermaid
 flowchart LR
@@ -78,6 +85,10 @@ claude
 #    applies it. Quit Claude Desktop completely first - it reads config
 #    only at launch.
 ./scripts/New-ClaudeConfig.ps1 -Mode Direct -CreateAppRegistration -Apply
+
+# 4b. If your tenant blocks user consent ("Need admin approval"), use the
+#     key credential instead. No app registration, no consent, no admin.
+./scripts/New-ClaudeConfig.ps1 -Mode Direct -CredentialKind static -Apply
 ```
 
 On macOS or Linux use `source ./scripts/set-claude-code-env.sh direct entra` instead.
@@ -133,6 +144,9 @@ docs/                            see the table above
 - **Claude Desktop is not Claude Code.** It ignores `ANTHROPIC_*` environment variables and reads its own settings, and it has two distinct providers — `foundry` and `gateway` — with different key sets.
 - Claude Desktop's gateway sign-in must request `https://cognitiveservices.azure.com/.default`, not `https://ai.azure.com`: the latter has no service principal a custom app registration can reference. The gateway accepts both audiences so one deployment serves both clients.
 - Claude Desktop reads its configuration **once, at launch**. Quit it fully, including the tray icon.
+- Tenant policy forces `disableLocalAuth = true` on Cognitive Services accounts, which kills every key-based path. The `SecurityControl=Ignore` tag exempts the resource; `allowLocalAuthExemption = true` applies it. ARM reports `Succeeded` either way, so verify the live resource, not the deployment.
+- The Foundry **Anthropic** surface expects `x-api-key`. `api-key` returns `401` with a message about an invalid subscription key, even though the key is fine. The Azure OpenAI surface of the same account is the other way round.
+- If Claude Desktop's Entra sign-in stops at **"Need admin approval"**, the tenant has disabled self-service consent. Use `-CredentialKind static`, or have an admin grant consent once.
 
 ## Deployment status � verified end to end
 
@@ -143,7 +157,7 @@ on 2026-08-21 (`eastus2`, API Management `BasicV2`, Foundry with `claude-haiku-4
 | Check | Result |
 |---|---|
 | Scenario 1 � direct to Foundry, Entra token | `200` |
-| Scenario 1 � direct to Foundry, API key | blocked by tenant policy (see below) |
+| Scenario 1 � direct to Foundry, API key | `200` (after the `SecurityControl=Ignore` exemption) |
 | Scenario 2 � via gateway, subscription key | `200` |
 | Scenario 2 � via gateway, Entra token | `200` |
 | Scenario 2 � via gateway, no credential | `401` |
@@ -155,6 +169,8 @@ on 2026-08-21 (`eastus2`, API Management `BasicV2`, Foundry with `claude-haiku-4
 | Gateway accepts both Entra audiences (`ai.azure.com`, `cognitiveservices.azure.com`) | named value `entra-audience-alt` present |
 | Entra public-client app registration for Claude Desktop | created, idempotent on re-run |
 | `.env` generation and apply, Direct and Gateway | profile written, matches the app's own schema |
+| Foundry `disableLocalAuth` after tagging `SecurityControl=Ignore` | flipped `true` -> `false`, keys retrievable |
+| Anthropic endpoint key header | `x-api-key` `200`; `api-key` and `Ocp-Apim-Subscription-Key` `401` |
 
 Four findings from that exercise are worth reading before you present this:
 

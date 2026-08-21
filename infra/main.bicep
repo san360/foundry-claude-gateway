@@ -34,6 +34,9 @@ param tags object = {
   solution: 'claude-foundry-ai-gateway'
 }
 
+@description('Tag every resource with SecurityControl=Ignore. This is the tenant policy exemption tag that permits local (API key) authentication on Cognitive Services accounts. Without it, policy forces disableLocalAuth=true on the Foundry account and the key-based scenarios cannot be demonstrated. Never set this on a production workload.')
+param allowLocalAuthExemption bool = true
+
 // -- Claude model selection ---------------------------------------------------
 
 @description('Claude Haiku model ID for fast background operations. Empty string skips it.')
@@ -167,10 +170,15 @@ var apimServiceName = 'apim-${workloadName}-${environmentName}-${uniqueSuffix}'
 var workspaceName = 'log-${workloadName}-${environmentName}'
 var appInsightsName = 'appi-${workloadName}-${environmentName}'
 
+// The policy that forces disableLocalAuth=true evaluates the tag, so it has to
+// be present at create time. Adding it later does not retroactively re-enable
+// keys on an account the policy already hardened.
+var allTags = union(tags, allowLocalAuthExemption ? { SecurityControl: 'Ignore' } : {})
+
 resource rg 'Microsoft.Resources/resourceGroups@2024-03-01' = {
   name: resourceGroupName
   location: location
-  tags: tags
+  tags: allTags
 }
 
 module monitoring 'modules/monitoring.bicep' = {
@@ -178,7 +186,7 @@ module monitoring 'modules/monitoring.bicep' = {
   scope: rg
   params: {
     location: location
-    tags: tags
+    tags: allTags
     workspaceName: workspaceName
     appInsightsName: appInsightsName
   }
@@ -191,7 +199,7 @@ module apim 'modules/apim.bicep' = if (deployGateway) {
   scope: rg
   params: {
     location: location
-    tags: tags
+    tags: allTags
     apimName: apimServiceName
     skuName: apimSkuName
     skuCapacity: apimSkuCapacity
@@ -211,7 +219,7 @@ module foundry 'modules/foundry.bicep' = {
   scope: rg
   params: {
     location: location
-    tags: tags
+    tags: allTags
     accountName: foundryAccountName
     projectName: foundryProjectName
     haikuModel: haikuModel
@@ -271,6 +279,12 @@ output foundryAnthropicBaseUrl string = foundry.outputs.anthropicBaseUrl
 
 @description('Foundry project endpoint.')
 output foundryProjectEndpoint string = foundry.outputs.projectEndpoint
+
+@description('Whether API key (local) authentication was requested on the Foundry account. Tenant policy can still override this; scripts verify the live value rather than trusting it.')
+output foundryLocalAuthEnabled bool = !disableFoundryLocalAuth
+
+@description('Whether the SecurityControl=Ignore policy exemption tag was applied.')
+output localAuthExemptionTagApplied bool = allowLocalAuthExemption
 
 @description('Gateway Anthropic base URL. Set as ANTHROPIC_FOUNDRY_BASE_URL for the gateway path.')
 output gatewayAnthropicBaseUrl string = deployGateway ? gatewayApi!.outputs.gatewayAnthropicBaseUrl : ''

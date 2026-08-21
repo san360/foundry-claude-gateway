@@ -100,7 +100,12 @@ switch ($Auth) {
                 --resource-group $o.resourceGroupName `
                 --query key1 -o tsv
             if ($LASTEXITCODE -ne 0 -or -not $key) {
-                throw 'Could not read the Foundry key. If disableFoundryLocalAuth is true, use -Auth Entra.'
+                throw @'
+Could not read the Foundry key. If the error mentions disableLocalAuth, keys are off
+on this account. Tenant policy enforces that unless the account carries the
+SecurityControl=Ignore exemption tag, which is only honoured at CREATE time.
+Redeploy with allowLocalAuthExemption = true, or use -Auth Entra.
+'@
             }
             $credential = 'Foundry account API key'
         }

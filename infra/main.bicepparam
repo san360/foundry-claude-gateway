@@ -53,6 +53,13 @@ param principalType = 'User'
 // Flip to true to prove the Entra-only story: Foundry then rejects API keys.
 param disableFoundryLocalAuth = false
 
+// Tenant policy forces disableLocalAuth=true on Cognitive Services accounts
+// unless the resource carries SecurityControl=Ignore. Keep this true to make
+// the key-based scenarios deployable; it must be present at CREATE time, since
+// adding the tag afterwards does not re-open keys on an already-hardened
+// account. Never set this on a production workload.
+param allowLocalAuthExemption = true
+
 // -----------------------------------------------------------------------------
 // AI gateway (Azure API Management). Set deployGateway = false to demo the
 // direct path only and avoid the API Management cost.
@@ -75,7 +82,12 @@ param gatewayBackendAuthMode = 'managedIdentity'
 param gatewayEntraAudience = 'https://ai.azure.com'
 param foundryTokenResource = 'https://ai.azure.com'
 param gatewayTokensPerMinute = 20000
-param gatewaySubscriptionKeyHeader = 'api-key'
+
+// Header carrying the API Management subscription key. 'x-api-key' is
+// Anthropic's own convention, is what the Foundry Anthropic endpoint itself
+// expects, and is one of only two schemes Claude Desktop can send. Using it
+// everywhere means one header name across both scenarios.
+param gatewaySubscriptionKeyHeader = 'x-api-key'
 
 // Bytes of request/response body logged to Application Insights. Great for a
 // demo ("here is the actual system prompt"), but prompts routinely contain

@@ -42,10 +42,11 @@ The gateway is the control plane. The demo value is that everything in steps 1�
 | --- | --- |
 | API Management **v2 tier** (`BasicV2`+) | The Anthropic Messages API schema for `llm-*` policies is only supported on v2 tiers. Classic Developer/Basic tiers cannot parse Anthropic token usage. |
 | API path segment `anthropic` | Claude Code appends `/v1/messages` to whatever base URL it is given. Matching Foundry's own `/anthropic` prefix means the gateway is a byte-for-byte URL substitution. |
-| Subscription key header `api-key` | Foundry accepts `api-key`. Reusing the same header name means `ANTHROPIC_FOUNDRY_API_KEY` works unchanged against both endpoints. Configurable via `gatewaySubscriptionKeyHeader`. |
+| Subscription key header `x-api-key` | The Foundry Anthropic surface expects Anthropic's own `x-api-key` and rejects `api-key` with a `401`. Using the same header at the gateway means `ANTHROPIC_FOUNDRY_API_KEY` works unchanged against both endpoints, and it is one of only two schemes Claude Desktop can send. Configurable via `gatewaySubscriptionKeyHeader`. |
 | `buffer-response="false"` | Claude Code streams every request as server-sent events. Buffering breaks streaming and makes the gateway look broken. |
 | `timeout="240"` | Long agentic turns with extended thinking routinely exceed the 300s default assumptions of simpler APIs; 240 is the attribute maximum. |
-| Backend auth via **managed identity** by default | Lets you set `disableFoundryLocalAuth = true` so the Foundry account has *no* usable keys, and the only credential in the system is a workload identity Azure rotates. |
+| Backend auth via **managed identity** by default | Lets you set `disableFoundryLocalAuth = true` so the Foundry account has *no* usable keys, and the only credential in the system is a workload identity Azure rotates. It also means a client authenticating with a *gateway* key never holds a Foundry credential. |
+| `SecurityControl=Ignore` tag, on by default | Tenant policy forces `disableLocalAuth = true` on every Cognitive Services account unless the resource is exempt, which would make the key-based scenarios undeployable. The tag opts this demo out. It is a demo affordance — drop it (`allowLocalAuthExemption = false`) for anything real, and use Entra. |
 | Deployments chained with `dependsOn` | Foundry serializes model deployments under one account; concurrent creates return HTTP 409. |
 | Model version `'2'` | "Hosted on Azure" — inference stays inside Azure. Version `'1'` routes to Anthropic-hosted infrastructure. |
 | Separate `monitoring` module deployed first | Both APIM and the API diagnostics need the Application Insights resource ID before they can be created. |
