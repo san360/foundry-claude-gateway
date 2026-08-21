@@ -63,6 +63,7 @@
         <validate-azure-ad-token tenant-id="{{entra-tenant-id}}" header-name="Authorization" failed-validation-httpcode="401" failed-validation-error-message="Unauthorized. A valid Microsoft Entra ID token is required to call this gateway." output-token-variable-name="callerToken">
           <audiences>
             <audience>{{entra-audience}}</audience>
+            <audience>{{entra-audience-alt}}</audience>
           </audiences>
         </validate-azure-ad-token>
       </otherwise>

@@ -74,11 +74,17 @@ if ($GrantSelfAccess) {
     }
     else {
         Write-Host "Principal    : $objectId (Cognitive Services User)" -ForegroundColor Cyan
-        $extraParams += @('principalId=' + $objectId, 'principalType=User')
+        $extraParams += @("principalId=$objectId", 'principalType=User')
     }
 }
 
 $deploymentName = "claude-foundry-$(Get-Date -Format 'yyyyMMddHHmmss')"
+
+# Every inline override has to follow ONE --parameters switch. Repeating the
+# switch makes the CLI concatenate the values into the preceding parameter, so
+# principalId arrives as "<guid> principalType=User" and ARM rejects it with
+# InvalidPrincipalId.
+$inlineParams = @("location=$Location") + $extraParams
 
 $azArgs = @(
     'deployment', 'sub', 'create',
@@ -86,17 +92,15 @@ $azArgs = @(
     '--location', $Location,
     '--template-file', $templateFile,
     '--parameters', $ParameterFile,
-    '--parameters', "location=$Location"
-)
-foreach ($p in $extraParams) { $azArgs += @('--parameters', $p) }
+    '--parameters'
+) + $inlineParams
 
 if ($WhatIf) {
     $azArgs = @('deployment', 'sub', 'what-if',
         '--location', $Location,
         '--template-file', $templateFile,
         '--parameters', $ParameterFile,
-        '--parameters', "location=$Location")
-    foreach ($p in $extraParams) { $azArgs += @('--parameters', $p) }
+        '--parameters') + $inlineParams
     Write-Host 'Running what-if preview...' -ForegroundColor Yellow
     az @azArgs
     return

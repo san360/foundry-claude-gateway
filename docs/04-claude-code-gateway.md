@@ -181,6 +181,54 @@ Turn body logging down before anything resembling production â€” prompts routine
 
 The catch-alls matter: Claude Code calls endpoints beyond `/v1/messages`, and a gateway that only publishes the one operation will fail in confusing ways.
 
+## Claude Desktop against the gateway
+
+Claude Desktop treats the gateway as a **separate provider**, not as the Foundry provider with a different URL. The key set is different, and mixing the two produces a config the app silently ignores.
+
+```powershell
+./scripts/New-ClaudeConfig.ps1 -Mode Gateway -ClientId <app-client-id> -Apply
+```
+
+| Setting | Value |
+|---|---|
+| `inferenceProvider` | `gateway` |
+| `inferenceGatewayBaseUrl` | `https://apim-â€¦.azure-api.net/anthropic` â€” full URL, `/anthropic` included |
+| `inferenceGatewayOidc` | JSON: `{issuer, clientId, tokenType, scopes}` |
+| `inferenceGatewayOidcAuthFlow` | `browser` or `broker` â€” **no** `device-code` on this provider |
+| `inferenceGatewayApiKey` | static-key alternative, used only when `inferenceCredentialKind=static` |
+| `inferenceGatewayAuthScheme` | `bearer` or `x-api-key` â€” those two values only |
+
+The OIDC block the generator writes:
+
+```json
+{
+  "issuer": "https://login.microsoftonline.com/<tenant-id>/v2.0",
+  "clientId": "<app-client-id>",
+  "tokenType": "access_token",
+  "scopes": ["https://cognitiveservices.azure.com/.default"]
+}
+```
+
+### Why the scope is `cognitiveservices.azure.com` and not `ai.azure.com`
+
+This is the one non-obvious constraint in the whole gateway path.
+
+Claude Code's *direct* path uses tokens whose audience is `https://ai.azure.com`. That works because Claude Code authenticates as a Microsoft first-party client. `https://ai.azure.com` has **no enumerable service principal in the tenant**, so you cannot add it as a required resource on your own app registration â€” a custom app can never request that audience, and Claude Desktop's gateway sign-in uses a custom app registration.
+
+`https://cognitiveservices.azure.com` *does* have a service principal and is user-consentable, so a custom app can obtain it. The gateway therefore accepts **both** audiences:
+
+```bicep
+gatewayEntraAudienceAdditional: 'https://cognitiveservices.azure.com'
+```
+
+which lands in the policy as a second `<audience>` inside `validate-azure-ad-token`, and is surfaced as the `gatewayEntraAudiences` deployment output. One gateway serves the CLI and the desktop app without either client having to change.
+
+Accepting a second audience is safe **only under `backendAuthMode = 'managedIdentity'`**, the default. In that mode the policy discards the caller's `Authorization` header and replaces it with the gateway's own managed-identity token before calling Foundry, so the inbound audience is purely an authentication gate â€” it never reaches the backend.
+
+> Under `backendAuthMode = 'passthrough'` the caller's token is forwarded to Foundry unchanged, so it *must* carry `aud: https://ai.azure.com`. **Passthrough is therefore incompatible with Claude Desktop's gateway sign-in.** Use `managedIdentity`, or point the desktop app at Foundry directly.
+
+Also remember `subscriptionRequired` must be off whenever Entra is a permitted client credential â€” APIM rejects the request on the missing key before your policy ever runs.
+
 ## Same thing from the SDK
 
 ```python
@@ -215,7 +263,7 @@ account with `claude-haiku-4-5` and `gatewayBackendAuthMode = 'managedIdentity'`
 The Foundry account had local (key) authentication disabled by tenant policy, so every
 result below was achieved with **no Foundry credential in existence anywhere**.
 
-### Client authentication matrix — `gatewayClientAuthMode = 'either'`
+### Client authentication matrix ï¿½ `gatewayClientAuthMode = 'either'`
 
 | Caller presents | Result | Notes |
 |---|---|---|
@@ -252,19 +300,19 @@ subscriptionRequired: gatewayClientAuthMode == 'subscriptionKey'
 ```
 
 Turning the built-in check off moves responsibility to the policy, which must then reject
-anonymous callers itself — otherwise the API would be open. The `either` branch does that
+anonymous callers itself ï¿½ otherwise the API would be open. The `either` branch does that
 by testing `context.Subscription == null`. Usefully, **API Management still resolves a
 valid subscription key into `context.Subscription` even when `subscriptionRequired` is
 `false`**, which is what makes a single `either` mode possible at all.
 
-### Backend authentication — both topologies confirmed
+### Backend authentication ï¿½ both topologies confirmed
 
 | `gatewayBackendAuthMode` | Caller auth | Result |
 |---|---|---|
 | `managedIdentity` | subscription key | `200` |
 | `managedIdentity` | Entra token | `200` |
-| `passthrough` | Entra token | `200` — caller's own token reaches Foundry, RBAC evaluated per user |
-| `passthrough` | subscription key | `401` at Foundry — nothing to forward |
+| `passthrough` | Entra token | `200` ï¿½ caller's own token reaches Foundry, RBAC evaluated per user |
+| `passthrough` | subscription key | `401` at Foundry ï¿½ nothing to forward |
 
 The last row is expected, not a defect: `passthrough` deliberately has no gateway-owned
 credential. Switch modes without redeploying:
@@ -274,7 +322,7 @@ credential. Switch modes without redeploying:
 ./scripts/Set-GatewayAuthMode.ps1 -BackendAuth managedIdentity
 ```
 
-### Token governance — confirmed enforcing
+### Token governance ï¿½ confirmed enforcing
 
 With `gatewayTokensPerMinute = 300`, the `llm-token-limit` policy throttled on the third
 request:

@@ -72,6 +72,12 @@ claude          # then /status -> API provider: Microsoft Foundry
 . ./scripts/Set-ClaudeCodeEnv.ps1 -Mode Gateway -Auth Entra
 ./scripts/Test-ClaudeEndpoint.ps1 -Mode Gateway -Auth Entra
 claude
+
+# 4. Claude Desktop (the standalone app) is a separate client with its own
+#    settings. This creates the Entra app registration, writes .env, and
+#    applies it. Quit Claude Desktop completely first - it reads config
+#    only at launch.
+./scripts/New-ClaudeConfig.ps1 -Mode Direct -CreateAppRegistration -Apply
 ```
 
 On macOS or Linux use `source ./scripts/set-claude-code-env.sh direct entra` instead.
@@ -107,6 +113,10 @@ scripts/
   set-claude-code-env.sh         configure Claude Code (bash/zsh)
   Test-ClaudeEndpoint.ps1        smoke test either path, either credential
   Set-GatewayAuthMode.ps1        switch auth topology live, without redeploying
+  New-FoundryAppRegistration.ps1 create the Entra public-client app (idempotent)
+  New-ClaudeConfig.ps1           write .env for either scenario, optionally apply
+  Set-ClaudeDesktopConfig.ps1    apply .env to Claude Desktop; export reg/plist/JSON
+.env.example                     annotated reference for every client setting
 samples/
   python/hello_claude.py         Anthropic SDK, all four path/credential combos
   rest/anthropic.http            raw HTTP requests for VS Code REST Client
@@ -119,26 +129,32 @@ docs/                            see the table above
 - Claude Code has **no interactive setup wizard** for Foundry (unlike Bedrock and Vertex). Configuration is environment variables only.
 - **Always pin models.** Without `ANTHROPIC_DEFAULT_SONNET_MODEL` and friends, aliases resolve to Claude Code's built-in Foundry defaults, which may not exist in your account. There is no startup validation, so the failure appears mid-conversation.
 - The Anthropic Messages API schema in the API Management AI gateway requires a **v2 tier** (`BasicV2`, `StandardV2`, `PremiumV2`).
-- Claude on Foundry bills in **Claude Consumption Units** through Azure Marketplace, and is unavailable on CSP, credit-only and sponsored subscriptions.
+- Claude on Foundry bills in **Claude Consumption Units** through Azure Marketplace, and is unavailable on CSP, credit-only and sponsored subscriptions. Entra External and most trial subscriptions carry a Marketplace purchase policy that blocks the offer outright.
+- **Claude Desktop is not Claude Code.** It ignores `ANTHROPIC_*` environment variables and reads its own settings, and it has two distinct providers â€” `foundry` and `gateway` â€” with different key sets.
+- Claude Desktop's gateway sign-in must request `https://cognitiveservices.azure.com/.default`, not `https://ai.azure.com`: the latter has no service principal a custom app registration can reference. The gateway accepts both audiences so one deployment serves both clients.
+- Claude Desktop reads its configuration **once, at launch**. Quit it fully, including the tray icon.
 
-## Deployment status — verified end to end
+## Deployment status ï¿½ verified end to end
 
-Both scenarios were deployed to Azure and exercised with live inference on 2026-08-20
-(`eastus2`, API Management `BasicV2`, Foundry with `claude-haiku-4-5` v2 and
+Both scenarios were deployed to Azure and exercised with live inference, most recently
+on 2026-08-21 (`eastus2`, API Management `BasicV2`, Foundry with `claude-haiku-4-5` v2 and
 `claude-sonnet-4-6` v1).
 
 | Check | Result |
 |---|---|
-| Scenario 1 — direct to Foundry, Entra token | `200` |
-| Scenario 1 — direct to Foundry, API key | blocked by tenant policy (see below) |
-| Scenario 2 — via gateway, subscription key | `200` |
-| Scenario 2 — via gateway, Entra token | `200` |
-| Scenario 2 — via gateway, no credential | `401` |
+| Scenario 1 ï¿½ direct to Foundry, Entra token | `200` |
+| Scenario 1 ï¿½ direct to Foundry, API key | blocked by tenant policy (see below) |
+| Scenario 2 ï¿½ via gateway, subscription key | `200` |
+| Scenario 2 ï¿½ via gateway, Entra token | `200` |
+| Scenario 2 ï¿½ via gateway, no credential | `401` |
 | Backend auth `managedIdentity` | `200` |
 | Backend auth `passthrough` with caller token | `200` |
 | SSE streaming through the gateway | full event sequence |
 | Gateway token budget (`llm-token-limit`) | `429` + `Retry-After` |
 | Both models, both paths | `200` |
+| Gateway accepts both Entra audiences (`ai.azure.com`, `cognitiveservices.azure.com`) | named value `entra-audience-alt` present |
+| Entra public-client app registration for Claude Desktop | created, idempotent on re-run |
+| `.env` generation and apply, Direct and Gateway | profile written, matches the app's own schema |
 
 Four findings from that exercise are worth reading before you present this:
 
@@ -148,7 +164,7 @@ Four findings from that exercise are worth reading before you present this:
    separately rather than one global version.
 
 2. **Internal, sandbox and credit-only subscriptions cannot deploy Claude at all.** It is
-   a Marketplace offer. The failure is late and misleading — the Foundry account and
+   a Marketplace offer. The failure is late and misleading ï¿½ the Foundry account and
    project both report `Succeeded` and only the model deployment fails. Probe with one
    model at capacity 1 before committing to a 30-minute run.
 

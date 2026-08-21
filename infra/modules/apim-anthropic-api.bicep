@@ -45,6 +45,17 @@ param entraTenantId string = tenant().tenantId
 @description('Expected audience claim on inbound Entra tokens. Claude Code and the Anthropic SDKs request https://ai.azure.com.')
 param entraAudience string = 'https://ai.azure.com'
 
+@description('''
+Second accepted audience. Claude Desktop signs in with a customer-owned app
+registration, and https://ai.azure.com exposes no service principal that such an
+app can be granted - so it can only ever present a Cognitive Services token.
+Accepting both lets the CLI and the desktop app share one gateway. This is safe
+under managedIdentity backend auth, where the gateway replaces the caller token
+with its own before calling Foundry; both values are still validated for issuer
+and signature.
+''')
+param entraAudienceAdditional string = 'https://cognitiveservices.azure.com'
+
 @description('Resource the gateway managed identity requests a token for when calling Foundry.')
 param foundryTokenResource string = 'https://ai.azure.com'
 
@@ -113,6 +124,16 @@ resource nvEntraAudience 'Microsoft.ApiManagement/service/namedValues@2024-05-01
   properties: {
     displayName: 'entra-audience'
     value: entraAudience
+    secret: false
+  }
+}
+
+resource nvEntraAudienceAlt 'Microsoft.ApiManagement/service/namedValues@2024-05-01' = {
+  parent: apim
+  name: 'entra-audience-alt'
+  properties: {
+    displayName: 'entra-audience-alt'
+    value: entraAudienceAdditional
     secret: false
   }
 }
@@ -227,6 +248,7 @@ resource apiPolicy 'Microsoft.ApiManagement/service/apis/policies@2024-05-01' = 
     nvBackendAuthMode
     nvEntraTenantId
     nvEntraAudience
+    nvEntraAudienceAlt
     nvFoundryTokenResource
     foundryBackend
     opCreateMessage

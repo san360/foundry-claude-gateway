@@ -141,6 +141,9 @@ param gatewayBackendAuthMode string = 'managedIdentity'
 @description('Expected audience on inbound Entra tokens at the gateway.')
 param gatewayEntraAudience string = 'https://ai.azure.com'
 
+@description('Second accepted audience at the gateway. Claude Desktop signs in with a customer-owned app registration, which can only obtain a Cognitive Services token; accepting both lets the CLI and the desktop app share one gateway.')
+param gatewayEntraAudienceAdditional string = 'https://cognitiveservices.azure.com'
+
 @description('Resource the gateway managed identity requests a token for when calling Foundry.')
 param foundryTokenResource string = 'https://ai.azure.com'
 
@@ -242,6 +245,7 @@ module gatewayApi 'modules/apim-anthropic-api.bicep' = if (deployGateway) {
     clientAuthMode: gatewayClientAuthMode
     backendAuthMode: gatewayBackendAuthMode
     entraAudience: gatewayEntraAudience
+    entraAudienceAdditional: gatewayEntraAudienceAdditional
     foundryTokenResource: foundryTokenResource
     tokensPerMinute: gatewayTokensPerMinute
     subscriptionKeyHeader: gatewaySubscriptionKeyHeader
@@ -279,6 +283,9 @@ output gatewaySubscriptionName string = deployGateway ? gatewayApi!.outputs.demo
 
 @description('Header that carries the API Management subscription key.')
 output gatewaySubscriptionKeyHeader string = deployGateway ? gatewayApi!.outputs.subscriptionKeyHeader : ''
+
+@description('Audiences the gateway accepts on inbound Entra tokens. Clients must request a token for one of these.')
+output gatewayEntraAudiences array = deployGateway ? [gatewayEntraAudience, gatewayEntraAudienceAdditional] : []
 
 @description('Deployment name to set as ANTHROPIC_DEFAULT_HAIKU_MODEL.')
 output haikuDeploymentName string = foundry.outputs.haikuDeploymentName

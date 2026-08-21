@@ -254,6 +254,103 @@ Expected — `/logout` is unavailable in Foundry mode. Credential lifetime is ma
 
 Undefined precedence. Always set exactly one. The helper scripts clear the other.
 
+## Claude Desktop
+
+### Settings changes have no effect
+
+Claude Desktop reads configuration **once, at launch**. Quit it completely — including the system tray icon on Windows and *Quit* rather than closing the window on macOS — then reopen it.
+
+### `AADSTS700016: Application with identifier '<guid>' was not found in the directory`
+
+The tenant ID was typed into the **Client ID** box. Anthropic's own documentation screenshot shows exactly this mistake. They are different GUIDs:
+
+- `inferenceFoundryTenantId` — the directory ID,
+- `inferenceFoundryClientId` — the **application (client) ID** of the app registration.
+
+`Set-ClaudeDesktopConfig.ps1` refuses to write a config where the two are equal.
+
+### `AADSTS50011: The redirect URI specified in the request does not match`
+
+Entra wildcards the **port** of a `127.0.0.1` redirect but not the **path**. `browser` flow needs `http://127.0.0.1/callback` registered; a bare `http://127.0.0.1` is not a match. Re-run `New-FoundryAppRegistration.ps1`, which registers all three flows' URIs.
+
+### `AADSTS7000218` / device-code flow rejected
+
+`isFallbackPublicClient` is false on the app registration. Public client flows must be enabled. `New-FoundryAppRegistration.ps1` sets this.
+
+### Sign-in succeeds but every request returns 403
+
+Signing in only proves identity. Calling the model needs the **Cognitive Services User** role on the Foundry account. `deploy.ps1 -GrantSelfAccess` grants it to the deploying user only — grant it separately to anyone else in the demo.
+
+### The registry policy is written but ignored
+
+In order of how often it bites:
+
+1. **`HKCU\SOFTWARE\Policies` is ACL'd read-only for standard users.** Writing it needs an elevated shell, in *both* hives. If you don't want elevation, use `-ApplyTarget Local`, which writes the per-user profile library instead.
+2. **An HKLM policy exists.** If it does, HKCU is ignored **entirely** — the two are not merged.
+3. **Wrong value type.** Values must be `REG_SZ`. `REG_EXPAND_SZ` reads as "present but unreadable"; `REG_QWORD`, `REG_MULTI_SZ` and `REG_BINARY` are invisible.
+4. **Values in a subkey.** They must sit directly under `…\Anthropic\Claude`.
+5. **Numbers or booleans written unquoted.** Under policy *everything* is a string, including `86400` and `false`. The local profile library is the opposite — native JSON types. `Set-ClaudeDesktopConfig.ps1` handles both.
+
+### Gateway mode: `401` from `validate-azure-ad-token` even though sign-in worked
+
+The audience. Claude Desktop's gateway provider signs in with **your** app registration, and a custom app registration cannot request `https://ai.azure.com` — that resource has no enumerable service principal in the tenant, so it cannot be added as a required resource.
+
+Use `https://cognitiveservices.azure.com/.default` in `inferenceGatewayOidc.scopes`, and make sure the gateway accepts it:
+
+```powershell
+az apim nv show -g <rg> --service-name <apim> --named-value-id entra-audience-alt --query value -o tsv
+# expected: https://cognitiveservices.azure.com
+```
+
+If it is missing, redeploy — `gatewayEntraAudienceAdditional` defaults to that value and the deployment output `gatewayEntraAudiences` should list both.
+
+This is safe only under `backendAuthMode = 'managedIdentity'`, where the policy replaces the caller's token with the gateway's managed-identity token before calling Foundry. Under `passthrough` the caller's token reaches Foundry and must be `aud: https://ai.azure.com`, so **passthrough cannot serve Claude Desktop's gateway sign-in**.
+
+### Gateway mode: device-code is not offered
+
+`inferenceGatewayOidcAuthFlow` accepts `browser` and `broker` only. Device code exists on the Foundry provider, not the gateway provider.
+
+### Gateway settings appear to be ignored
+
+Check `inferenceProvider`. The Foundry keys (`inferenceFoundry*`) and the gateway keys (`inferenceGateway*`) belong to two different providers; whichever `inferenceProvider` names, the other block is discarded. Don't try to point the Foundry provider at the gateway URL — it has no base-URL setting.
+
+### The model picker is empty or missing a model
+
+`modelDiscoveryEnabled` must be `false`: Foundry exposes no Anthropic model-listing endpoint, so discovery returns nothing and the app shows an empty list. `inferenceModels` is then authoritative, and each entry's `name` must be the **Foundry deployment name** — not the upstream Anthropic model ID:
+
+```json
+[{"name":"claude-sonnet-4-6","labelOverride":"claude-sonnet-4-6","anthropicFamilyTier":"sonnet"}]
+```
+
+`anthropicFamilyTier` drives the app's own sonnet/haiku routing; omit it and the model may never be selected automatically.
+
+## Deployment scripts
+
+### `InvalidPrincipalId`, with the GUID followed by extra text
+
+Azure CLI concatenates values that follow a **repeated** `--parameters` switch into the *preceding* parameter, so `principalId` arrives as `"<guid> principalType=User"`. Put every inline override after a **single** `--parameters`:
+
+```powershell
+# wrong
+az deployment group create --parameters a=1 --parameters b=2
+# right
+az deployment group create --parameters a=1 b=2
+```
+
+Fixed in `deploy.ps1`.
+
+### `.deployment-outputs.json` points at resources that no longer exist
+
+Every helper script reads that file. If the resource group was deleted out of band, the file goes stale and the scripts fail against deleted resources. Re-run `deploy.ps1`; it rewrites the file. Then regenerate the client config, which is derived from it:
+
+```powershell
+./scripts/New-ClaudeConfig.ps1 -Mode Direct -ClientId <app-client-id> -Apply
+```
+
+### Deploying into an Entra External / MCAPS trial subscription
+
+Anthropic models are Marketplace offerings. External-tenant and many trial subscriptions carry a Marketplace purchase policy that blocks the offer acquisition, and the failure surfaces as a template error rather than a policy one. This is not fixable from the template — private Marketplace stores and quota ID changes do not lift it. Deploy into a subscription without the restriction.
+
 ## Useful queries
 
 **Gateway failures in the last hour**

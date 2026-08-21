@@ -1,6 +1,9 @@
 # Deployment outputs contain resource names and endpoints for the environment.
 .deployment-outputs.json
 
+# Generated client configuration (registry/plist/JSON payloads)
+out/
+
 # Compiled Bicep artifacts
 *.bicep.json
 infra/**/*.json

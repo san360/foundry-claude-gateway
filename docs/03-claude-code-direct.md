@@ -175,6 +175,88 @@ launchctl setenv ANTHROPIC_FOUNDRY_RESOURCE claudedemo-demo-abc123
 
 Never put a key in a committed settings file — leave the credential to `az login`.
 
+## Claude Desktop — the standalone app
+
+Claude Desktop is a different client from the Claude Code CLI. It ignores `ANTHROPIC_*` environment variables entirely and reads its own settings, either from a managed-policy location or from the profile library the in-app **Settings → Foundry** pane writes.
+
+### One command
+
+```powershell
+# Creates the Entra app registration if you don't already have one,
+# writes .env, and applies it to the local profile library.
+./scripts/New-ClaudeConfig.ps1 -Mode Direct -CreateAppRegistration -Apply
+```
+
+If the app registration already exists, pass it instead of creating a second one:
+
+```powershell
+./scripts/New-ClaudeConfig.ps1 -Mode Direct -ClientId <app-client-id> -Apply
+```
+
+That does three things:
+
+1. reads `.deployment-outputs.json` and writes an annotated `.env` (gitignored — see `.env.example` for the committed reference),
+2. applies those values to the active Claude Desktop profile,
+3. exports `out/claude-desktop-foundry.reg`, `out/com.anthropic.claudefordesktop.plist` and `out/claude-desktop-managed-settings.json` for fleet rollout.
+
+**Claude Desktop reads configuration once, at launch.** Quit it completely — including the system tray icon — and reopen it.
+
+### The settings, and what each one is
+
+| Setting | Value | Notes |
+|---|---|---|
+| `inferenceProvider` | `foundry` | Setting this activates third-party mode |
+| `inferenceCredentialKind` | `interactive` | Entra sign-in. When set, there is no fallback to any other credential |
+| `inferenceFoundryResource` | `claudedemo-demo-abc123` | Resource **name** only — the app builds the URL |
+| `inferenceFoundryTenantId` | directory (tenant) ID | |
+| `inferenceFoundryClientId` | **application (client) ID** | Not the tenant ID — see below |
+| `inferenceFoundryAuthFlow` | `browser` | or `device-code` / `broker` |
+| `inferenceSessionLifetimeSec` | `86400` | Bounded by your own IdP session policy |
+| `inferenceModels` | JSON array | `name` is the Foundry **deployment name**; first entry is the default |
+| `modelDiscoveryEnabled` | `false` | Foundry has no Anthropic model-listing endpoint, so the list above is authoritative |
+
+> **The client ID trap.** Anthropic's own documentation screenshot shows a tenant ID typed into the *Client ID* box. That fails with `AADSTS700016 — Application not found in the directory`. The two fields take different GUIDs. `Set-ClaudeDesktopConfig.ps1` refuses to write a config where they match.
+
+### The app registration
+
+Claude Desktop signs the user in with a **public client** app registration that holds a delegated permission on Azure Cognitive Services. `scripts/New-FoundryAppRegistration.ps1` creates it and is idempotent:
+
+```powershell
+./scripts/New-FoundryAppRegistration.ps1
+```
+
+It configures:
+
+- `isFallbackPublicClient = true` (required for device-code and for any flow without a secret),
+- delegated `user_impersonation` on resource app `7d312290-28c8-473c-a0ed-8e53749b6d6d` (Azure Cognitive Services),
+- three redirect URIs, one per supported flow:
+
+| Flow | Redirect URI |
+|---|---|
+| `browser` | `http://127.0.0.1/callback` |
+| `broker` | `ms-appx-web://Microsoft.AAD.BrokerPlugin/{clientId}` and `msauth.com.anthropic.claudefordesktop://auth` |
+| `device-code` | none needed |
+
+Entra wildcards the **port** of a `127.0.0.1` redirect but not the **path**. A bare `http://127.0.0.1` fails with `AADSTS50011`.
+
+`user_impersonation` on Cognitive Services is a *user-consentable* scope, so an ordinary user can complete the sign-in themselves. `-GrantAdminConsent` is available but optional, and will fail harmlessly if you are not a directory admin.
+
+Sign-in only gets the user a token. Calling the model still requires the **Cognitive Services User** role on the Foundry account — `deploy.ps1 -GrantSelfAccess` grants it to you; grant it to the demo audience separately.
+
+### Rolling it out to a fleet
+
+Two placement options, both exported to `out/` by the script above:
+
+- **Managed policy** — `HKCU\SOFTWARE\Policies\Anthropic\Claude` or `HKLM\...`, or the macOS plist. Use `-ApplyTarget Policy`.
+- **Local profile** — the per-user profile library. This is the default, and needs no elevation.
+
+Windows specifics that will cost you an afternoon otherwise:
+
+- `HKCU\SOFTWARE\Policies` is ACL'd read-only for standard users, so the *policy* path needs elevation in **both** hives.
+- Values must be `REG_SZ` placed **directly under** the key. Subkeys are ignored. `REG_EXPAND_SZ` reads as "present but unreadable"; `REG_QWORD`, `REG_MULTI_SZ` and `REG_BINARY` are invisible.
+- If an HKLM policy exists, HKCU is ignored **entirely** — not merged.
+- Under policy, every value is a string, including numbers and booleans. In the local profile library they are native JSON types. The scripts handle this difference for you.
+
 ## Same thing from the SDK
 
 ```python
