@@ -161,6 +161,21 @@ param gatewaySubscriptionKeyHeader string = 'api-key'
 @maxValue(8192)
 param gatewayBodyLogBytes int = 8192
 
+@description('''
+Serve GET /v1/models from the gateway so Claude Desktop's "Model discovery"
+toggle works. Foundry's Anthropic surface returns 404 api_not_supported for that
+path, so discovery is only possible through the gateway. The gateway lists the
+account's deployments over ARM with its managed identity and returns the
+Anthropic-format ones. Direct-to-Foundry clients must keep discovery off and
+enumerate models explicitly.
+''')
+param gatewayModelDiscovery bool = true
+
+@description('Seconds the gateway caches the synthesised model list.')
+@minValue(0)
+@maxValue(3600)
+param gatewayModelDiscoveryCacheSeconds int = 300
+
 // -----------------------------------------------------------------------------
 
 var uniqueSuffix = take(uniqueString(subscription().subscriptionId, resourceGroupName), 6)
@@ -255,6 +270,9 @@ module gatewayApi 'modules/apim-anthropic-api.bicep' = if (deployGateway) {
     entraAudience: gatewayEntraAudience
     entraAudienceAdditional: gatewayEntraAudienceAdditional
     foundryTokenResource: foundryTokenResource
+    enableModelDiscovery: gatewayModelDiscovery
+    foundryAccountResourceId: foundry.outputs.accountId
+    modelDiscoveryCacheSeconds: gatewayModelDiscoveryCacheSeconds
     tokensPerMinute: gatewayTokensPerMinute
     subscriptionKeyHeader: gatewaySubscriptionKeyHeader
     // API Management validates the subscription key in its own pipeline, *before* the

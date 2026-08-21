@@ -173,6 +173,9 @@ on 2026-08-21 (`eastus2`, API Management `BasicV2`, Foundry with `claude-haiku-4
 | `.env` generation and apply, Direct and Gateway | profile written, matches the app's own schema |
 | Foundry `disableLocalAuth` after tagging `SecurityControl=Ignore` | flipped `true` -> `false`, keys retrievable |
 | Anthropic endpoint key header | `x-api-key` `200`; `api-key` and `Ocp-Apim-Subscription-Key` `401` |
+| Model discovery `GET /v1/models` via gateway (key and Entra) | `200`, both deployments, `x-gateway-synthesised: models-list` |
+| Model discovery `GET /v1/models` with no credential | `401` |
+| Model discovery `GET /v1/models` direct to Foundry | `404 api_not_supported` � gateway-only capability |
 
 Four findings from that exercise are worth reading before you present this:
 

@@ -59,6 +59,24 @@ param entraAudienceAdditional string = 'https://cognitiveservices.azure.com'
 @description('Resource the gateway managed identity requests a token for when calling Foundry.')
 param foundryTokenResource string = 'https://ai.azure.com'
 
+@description('''
+Serve GET /v1/models from the gateway. Foundry's Anthropic surface does not
+implement the endpoint - it answers 404 api_not_supported - so Claude Desktop's
+"Model discovery" toggle cannot work against Foundry directly. When enabled the
+gateway synthesises the response by listing the account's model deployments over
+ARM with its own managed identity, filtering to Anthropic-format deployments in
+the Succeeded state, and shaping the result like Anthropic's models endpoint.
+''')
+param enableModelDiscovery bool = true
+
+@description('ARM resource ID of the Foundry account, used to enumerate deployments for model discovery.')
+param foundryAccountResourceId string = ''
+
+@description('Seconds to cache the synthesised model list. Discovery runs at client launch, so a short cache removes ARM from the hot path without hiding a newly added deployment for long.')
+@minValue(0)
+@maxValue(3600)
+param modelDiscoveryCacheSeconds int = 300
+
 @description('Tokens per minute allowed per caller before the gateway returns 429.')
 param tokensPerMinute int = 20000
 
@@ -69,10 +87,26 @@ param bodyLogBytes int = 8192
 
 var backendId = 'foundry-anthropic'
 
+// ARM's deployments collection for the Foundry account. Model discovery reads
+// this with the gateway's managed identity, which already holds Cognitive
+// Services User - that role carries Microsoft.CognitiveServices/*/read, so
+// enumerating deployments needs no additional role assignment.
+var foundryDeploymentsUri = empty(foundryAccountResourceId)
+  ? ''
+  : '${environment().resourceManager}${substring(foundryAccountResourceId, 1)}/deployments?api-version=2024-10-01'
+
 var policyXml = replace(
-  replace(loadTextContent('../policies/anthropic-api.xml'), '__TOKENS_PER_MINUTE__', string(tokensPerMinute)),
-  '__BACKEND_ID__',
-  backendId
+  replace(
+    replace(
+      replace(loadTextContent('../policies/anthropic-api.xml'), '__TOKENS_PER_MINUTE__', string(tokensPerMinute)),
+      '__BACKEND_ID__',
+      backendId
+    ),
+    '__MODEL_DISCOVERY__',
+    (enableModelDiscovery && !empty(foundryAccountResourceId)) ? 'enabled' : 'disabled'
+  ),
+  '__DISCOVERY_CACHE_SECONDS__',
+  string(modelDiscoveryCacheSeconds)
 )
 
 resource apim 'Microsoft.ApiManagement/service@2024-05-01' existing = {
@@ -144,6 +178,19 @@ resource nvFoundryTokenResource 'Microsoft.ApiManagement/service/namedValues@202
   properties: {
     displayName: 'foundry-token-resource'
     value: foundryTokenResource
+    secret: false
+  }
+}
+
+// Always created, even when discovery is off, so the policy's {{...}} reference
+// always resolves. An unresolved named value fails the whole policy at apply
+// time, not just the branch that uses it.
+resource nvFoundryDeploymentsUri 'Microsoft.ApiManagement/service/namedValues@2024-05-01' = {
+  parent: apim
+  name: 'foundry-deployments-uri'
+  properties: {
+    displayName: 'foundry-deployments-uri'
+    value: empty(foundryDeploymentsUri) ? environment().resourceManager : foundryDeploymentsUri
     secret: false
   }
 }
@@ -250,6 +297,7 @@ resource apiPolicy 'Microsoft.ApiManagement/service/apis/policies@2024-05-01' = 
     nvEntraAudience
     nvEntraAudienceAlt
     nvFoundryTokenResource
+    nvFoundryDeploymentsUri
     foundryBackend
     opCreateMessage
     opCountTokens

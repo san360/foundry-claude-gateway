@@ -431,9 +431,21 @@ Add-Line '# Model picker contents. "name" is the Foundry deployment name and the
 Add-Line '# first entry is the default.'
 Add-Setting 'inferenceModels' $modelJson
 Add-Line ''
-Add-Line '# Foundry exposes no Anthropic model-listing endpoint, so discovery'
-Add-Line '# stays off and the list above is authoritative.'
-Add-Setting 'modelDiscoveryEnabled' 'false'
+if ($Mode -eq 'Gateway') {
+    # Foundry answers GET /v1/models with 404, but the gateway synthesises the
+    # response from the account's Anthropic-format deployments, so the picker
+    # can populate itself. inferenceModels above stays as the fallback for the
+    # first launch and for when discovery is switched off at the gateway.
+    Add-Line '# The gateway answers GET /v1/models itself (Foundry does not implement'
+    Add-Line '# it), so the picker can populate itself from the live deployments.'
+    Add-Setting 'modelDiscoveryEnabled' 'true'
+}
+else {
+    Add-Line '# Foundry exposes no Anthropic model-listing endpoint, so discovery'
+    Add-Line '# stays off and the list above is authoritative. Discovery only works'
+    Add-Line '# through the gateway. See docs/04-claude-code-gateway.md.'
+    Add-Setting 'modelDiscoveryEnabled' 'false'
+}
 Add-Line ''
 Add-Line '# HTTPS origin for artifact previews. Empty uses the commercial host.'
 Add-Setting 'userContentRendererUrl' $UserContentRendererUrl

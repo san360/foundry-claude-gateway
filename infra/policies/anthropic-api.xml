@@ -13,8 +13,10 @@
     {{entra-tenant-id}}         tenant used to validate inbound Entra tokens
     {{entra-audience}}          expected "aud" claim on inbound Entra tokens
     {{foundry-token-resource}}  resource the gateway managed identity requests
+    {{foundry-deployments-uri}} ARM deployments collection, read for discovery
 
-  __TOKENS_PER_MINUTE__ and __BACKEND_ID__ are substituted at deploy time by
+  __TOKENS_PER_MINUTE__, __BACKEND_ID__, __MODEL_DISCOVERY__ and
+  __DISCOVERY_CACHE_SECONDS__ are substituted at deploy time by
   infra/modules/apim-anthropic-api.bicep.
 
   Note: C# string literals inside XML attributes must be escaped as &quot;.
@@ -93,6 +95,104 @@
         }
         return context.Request.IpAddress;
     }" />
+
+    <!--
+      STEP 1b - Model discovery.
+
+      Foundry's Anthropic surface does not implement GET /v1/models; it answers
+      404 api_not_supported. Claude Desktop's "Model discovery" toggle calls
+      exactly that path at launch, so without this block the toggle can only
+      fail. The gateway therefore answers the call itself.
+
+      Deliberately placed AFTER authentication (so the deployment inventory is
+      not public) but BEFORE token governance (a metadata call consumes no model
+      tokens, and llm-token-limit has no request body to inspect on a GET).
+
+      The list is built from ARM rather than hard-coded, so adding a deployment
+      in Foundry shows up in the client without touching this policy.
+    -->
+    <choose>
+      <when condition="@(&quot;__MODEL_DISCOVERY__&quot; == &quot;enabled&quot; &amp;&amp; context.Operation.Id == &quot;models-list&quot;)">
+        <cache-lookup-value key="@(&quot;anthropic-models-&quot; + context.Api.Revision)" variable-name="cachedModels" caching-type="internal" />
+        <choose>
+          <when condition="@(!context.Variables.ContainsKey(&quot;cachedModels&quot;))">
+            <authentication-managed-identity resource="https://management.azure.com/" output-token-variable-name="armToken" ignore-error="false" />
+            <send-request mode="new" response-variable-name="armResponse" timeout="20" ignore-error="true">
+              <set-url>{{foundry-deployments-uri}}</set-url>
+              <set-method>GET</set-method>
+              <set-header name="Authorization" exists-action="override">
+                <value>@("Bearer " + (string)context.Variables["armToken"])</value>
+              </set-header>
+            </send-request>
+            <set-variable name="cachedModels" value="@{
+                var models = new JArray();
+                try
+                {
+                    var armResponse = (IResponse)context.Variables[&quot;armResponse&quot;];
+                    if (armResponse != null &amp;&amp; armResponse.StatusCode == 200)
+                    {
+                        var deployments = armResponse.Body.As&lt;JObject&gt;()[&quot;value&quot;] as JArray;
+                        if (deployments != null)
+                        {
+                            foreach (var deployment in deployments)
+                            {
+                                var props = deployment[&quot;properties&quot;];
+                                if (props == null) { continue; }
+
+                                // Only Anthropic-format deployments speak the
+                                // Messages API this gateway exposes. A GPT or
+                                // Llama deployment listed here would appear in
+                                // the picker and then fail on every request.
+                                var model = props[&quot;model&quot;];
+                                if (model == null || (string)model[&quot;format&quot;] != &quot;Anthropic&quot;) { continue; }
+                                if ((string)props[&quot;provisioningState&quot;] != &quot;Succeeded&quot;) { continue; }
+
+                                var name = (string)deployment[&quot;name&quot;];
+                                var created = props[&quot;createdAt&quot;] != null
+                                    ? (string)props[&quot;createdAt&quot;]
+                                    : DateTime.UtcNow.ToString(&quot;yyyy-MM-ddTHH:mm:ssZ&quot;);
+
+                                var entry = new JObject();
+                                entry[&quot;type&quot;] = &quot;model&quot;;
+                                // The Messages API keys off the DEPLOYMENT
+                                // name, not the underlying model id, so that
+                                // is what the client must send back.
+                                entry[&quot;id&quot;] = name;
+                                entry[&quot;display_name&quot;] = name;
+                                entry[&quot;created_at&quot;] = created;
+                                models.Add(entry);
+                            }
+                        }
+                    }
+                }
+                catch (Exception)
+                {
+                    // Fall through to an empty list; the client keeps whatever
+                    // model list it was configured with.
+                }
+
+                var payload = new JObject();
+                payload[&quot;data&quot;] = models;
+                payload[&quot;has_more&quot;] = false;
+                payload[&quot;first_id&quot;] = models.Count &gt; 0 ? models[0][&quot;id&quot;] : null;
+                payload[&quot;last_id&quot;] = models.Count &gt; 0 ? models[models.Count - 1][&quot;id&quot;] : null;
+                return payload.ToString(Newtonsoft.Json.Formatting.None);
+            }" />
+            <cache-store-value key="@(&quot;anthropic-models-&quot; + context.Api.Revision)" value="@((string)context.Variables[&quot;cachedModels&quot;])" duration="__DISCOVERY_CACHE_SECONDS__" caching-type="internal" />
+          </when>
+        </choose>
+        <return-response>
+          <set-status code="200" reason="OK" />
+          <set-header name="Content-Type" exists-action="override">
+            <value>application/json</value>
+          </set-header>
+          <set-header name="x-gateway-synthesised" exists-action="override">
+            <value>models-list</value>
+          </set-header>
+          <set-body>@((string)context.Variables["cachedModels"])</set-body>
+        </return-response>
+      </when>
+    </choose>
 
     <!--
       STEP 2 - Token governance.

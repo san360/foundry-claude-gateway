@@ -175,11 +175,76 @@ Turn body logging down before anything resembling production — prompts routine
 | --- | --- | --- |
 | POST | `/v1/messages` | Inference — the one that matters |
 | POST | `/v1/messages/count_tokens` | Token counting with no inference charge |
-| GET | `/v1/models` | Model discovery |
+| GET | `/v1/models` | Model discovery — **answered by the gateway itself**, see below |
 | POST | `/*` | Catch-all so future Anthropic endpoints keep working |
 | GET | `/*` | Catch-all |
 
 The catch-alls matter: Claude Code calls endpoints beyond `/v1/messages`, and a gateway that only publishes the one operation will fail in confusing ways.
+
+## Model discovery
+
+This is the clearest capability the gateway adds that the direct path simply cannot offer, so it is worth a slide of its own in the demo.
+
+Claude Desktop has a **Model discovery** toggle. When it is on, the app calls `GET {base}/v1/models` at launch and populates its model picker from the response. When it is off, you type the model names in by hand and keep them in step with the deployments yourself.
+
+Foundry's Anthropic surface does not implement that endpoint:
+
+```console
+$ curl https://<foundry>.services.ai.azure.com/anthropic/v1/models -H "x-api-key: ..."
+404 {"error":{"code":"api_not_supported","message":"..."}}
+```
+
+So **the toggle can never work against Foundry directly** — leave it off there. Through the gateway it works, because the gateway answers the call itself instead of forwarding it.
+
+### How the gateway answers it
+
+The inbound policy intercepts `context.Operation.Id == "models-list"`, asks ARM for the Foundry account's deployments using the gateway's own managed identity, and reshapes the result into Anthropic's `/v1/models` envelope:
+
+```json
+{
+  "data": [
+    { "type": "model", "id": "claude-haiku-4-5",  "display_name": "claude-haiku-4-5",  "created_at": "..." },
+    { "type": "model", "id": "claude-sonnet-4-6", "display_name": "claude-sonnet-4-6", "created_at": "..." }
+  ],
+  "has_more": false,
+  "first_id": "claude-haiku-4-5",
+  "last_id": "claude-sonnet-4-6"
+}
+```
+
+Responses carry `x-gateway-synthesised: models-list` so you can tell at a glance that the gateway produced the answer rather than the backend. Note there is **no** `x-gateway` header on these responses: `return-response` short-circuits the pipeline before the outbound section runs.
+
+The smoke-test script demonstrates the contrast in two commands:
+
+```powershell
+./scripts/Test-ClaudeEndpoint.ps1 -Mode Gateway -Auth Key -ListModels   # 200, lists the deployments
+./scripts/Test-ClaudeEndpoint.ps1 -Mode Direct  -Auth Entra -ListModels # 404 api_not_supported
+```
+
+Four design points are worth calling out, because each one is a decision rather than an accident:
+
+- **`id` is the *deployment* name, not the model id.** Foundry's Messages API routes on the deployment name, so the value the client discovers is exactly the value it must send back in `"model"`. Returning `claude-sonnet-4-6-20260514` would look tidier and break every request.
+- **The block sits after authentication but before token governance.** Your deployment inventory is not public — an anonymous call gets 401. But a metadata call consumes no model tokens, and `llm-token-limit` has no request body to inspect on a `GET`, so discovery is deliberately routed around it.
+- **The result is cached** (`modelDiscoveryCacheSeconds`, default 300). Discovery fires at client launch, so a short cache keeps ARM off the hot path without hiding a newly added deployment for long.
+- **ARM failures degrade to an empty list, not an error.** `ignore-error="true"` on the `send-request` plus a `try/catch` mean a transient ARM problem leaves the client with whatever model list it already had, rather than blocking launch.
+
+No extra RBAC is needed: the gateway's managed identity already holds **Cognitive Services User** for the Foundry account, and that role carries `Microsoft.CognitiveServices/*/read`, which covers reading deployments.
+
+### Only Anthropic-format deployments are listed
+
+The policy filters on `properties.model.format == "Anthropic"` and `provisioningState == "Succeeded"`. A Foundry account can host GPT, Llama or Mistral deployments alongside Claude, and it is tempting to expose all of them here.
+
+Don't. This API speaks the **Anthropic Messages API**, and Foundry serves non-Anthropic models on completely different surfaces (`/openai/v1/chat/completions`, `/models/chat/completions`) with a different request and response schema. A GPT deployment advertised through discovery would appear in Claude Desktop's picker and then fail on **every** request. Listing only what actually works is the honest behaviour.
+
+Making non-Claude models genuinely usable from an Anthropic client is possible but is a different project: it needs bidirectional Anthropic ↔ OpenAI translation in the policy, and translating **SSE streaming** between the two event schemas is the hard part. It is out of scope here.
+
+### Turning it off
+
+```bicep
+gatewayModelDiscovery: false
+```
+
+The operation then forwards to Foundry like any other and returns Foundry's own 404 — useful if you want to demonstrate the unmodified behaviour.
 
 ## Claude Desktop against the gateway
 
@@ -382,3 +447,16 @@ Read the error body to know which layer throttled: `x-gateway-error:
 OpenAITokenLimitExceeded` and a `Retry-After` header mean the gateway, while a
 `RateLimitReached` / `UserByModelByMinute...` body means the model deployment. Raise
 `haikuCapacity` if you intend to demonstrate gateway-side governance.
+
+### Model discovery — confirmed gateway-only
+
+`GET /v1/models`, against the live deployment:
+
+| Path | Credential | Result |
+| --- | --- | --- |
+| Gateway | subscription key | **200** — both deployments, `x-gateway-synthesised: models-list` |
+| Gateway | Entra bearer token | **200** — same payload |
+| Gateway | none | **401** — the inventory is not public |
+| Foundry direct | account key | **404** `api_not_supported` |
+
+The direct 404 is the point: it is the same request, and only the gateway can answer it. `POST /v1/messages` was re-tested alongside and still returns 200, confirming the discovery branch does not interfere with the inference path.

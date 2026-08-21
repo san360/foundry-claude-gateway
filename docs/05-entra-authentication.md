@@ -248,13 +248,31 @@ The equivalent Microsoft Graph body, which is what the script PATCHes in a singl
 
 ### Consent — the part that actually blocks people
 
-`user_impersonation` is classified as user-consentable, and most documentation stops there. That classification only applies in a tenant that permits self-service consent. Where an administrator has set **Enterprise applications → Consent and permissions → User consent settings → *Do not allow user consent***, the tenant setting wins and **every** delegated permission requires an admin grant regardless of its own classification.
+`user_impersonation` is classified as user-consentable, and most documentation stops there. Whether an ordinary user can actually approve it depends on the tenant's **user consent settings**, and there are three states, not two:
 
-The symptom is unmistakable and terminal:
+| Tenant setting | Effect on this app |
+| --- | --- |
+| *Allow user consent for apps* | The user consents at first sign-in. Nothing else to do. |
+| *Allow user consent for apps from verified publishers, for selected permissions* | The user can consent **only** to permissions an admin has classified as low impact. `user_impersonation` on Cognitive Services is **not** in the default classification set, so sign-in fails. |
+| *Do not allow user consent* | Every delegated permission needs an admin grant. Sign-in fails. |
+
+The middle row is the one that catches people out, and it is the **default** in a modern tenant — the policy is named `ManagePermissionGrantsForSelf.microsoft-user-default-low`. User consent is not switched off; it is restricted to a small set of low-impact permissions, which out of the box is only Microsoft Graph `User.Read`, `openid`, `profile`, `email` and `offline_access`. Everything else, including this scope, is refused. It is easy to read the setting as "user consent is enabled" and conclude the app should work.
+
+Check which policy your tenant uses:
+
+```powershell
+az rest --method GET `
+  --url "https://graph.microsoft.com/v1.0/policies/authorizationPolicy" `
+  --query "permissionGrantPolicyIdsAssignedToDefaultUserRole"
+```
+
+`ManagePermissionGrantsForSelf.microsoft-user-default-low` is the restricted default; an empty array means user consent is off entirely. Either way the symptom is the same, and terminal:
 
 > **Need admin approval** — *Claude Desktop - Microsoft Foundry needs permission to access resources in your organisation that only an admin can grant.*
 
-Grant it once, tenant-wide, in any of three ways:
+There are three ways out.
+
+**1. Admin consent — one action, tenant-wide.** The usual answer:
 
 ```powershell
 ./scripts/New-FoundryAppRegistration.ps1 -GrantAdminConsent   # needs Privileged Role Admin or Global Admin
@@ -267,13 +285,31 @@ or send an administrator this URL, which needs no tooling and no access to this 
 https://login.microsoftonline.com/<tenant-id>/adminconsent?client_id=<client-id>
 ```
 
-Check whether it has already been granted:
+**2. Classify the permission as low impact.** Less well known, and a better fit where a security team objects to blanket admin consent but is comfortable with the scope itself. An admin adds `user_impersonation` on Cognitive Services to the low-impact set, after which **users consent for themselves** as normal, per user, and each grant stays visible and individually revocable:
+
+```powershell
+# Cognitive Services resource app: cb5ea8b8-3faa-4e4f-8c66-83f1e6b7b6ef
+az rest --method POST `
+  --url "https://graph.microsoft.com/v1.0/policies/permissionGrantPolicies/microsoft-user-default-low/includes" `
+  --body '{
+    "permissionType": "delegated",
+    "resourceApplication": "cb5ea8b8-3faa-4e4f-8c66-83f1e6b7b6ef",
+    "permissionClassification": "low",
+    "permissions": ["user_impersonation"]
+  }'
+```
+
+This still needs a directory admin, but it is a narrower and more reviewable change than granting the whole app tenant-wide.
+
+**3. Use keys.** No registration, no consent, no directory admin — see the [key-based scenario](03-claude-code-direct.md#key-based-access-no-entra-app-required).
+
+Check whether consent has already been granted:
 
 ```powershell
 az ad app permission list-grants --id <client-id> -o table
 ```
 
-An empty result means no consent exists yet. Until it does, the [key-based scenario](03-claude-code-direct.md#key-based-access-no-entra-app-required) is the way to run the demo — it needs no registration, no consent and no directory admin.
+An empty result means no consent exists yet, and no amount of retrying the sign-in will change that.
 
 ### The second lock: RBAC
 

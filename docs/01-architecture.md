@@ -26,15 +26,18 @@ Claude Code / SDK
   → API Management inbound policy
       1. authenticate the caller (subscription key and/or Entra token)
       2. derive a stable caller identity
-      3. enforce llm-token-limit (per-caller TPM budget → 429)
-      4. emit llm-emit-token-metric to Application Insights
-      5. select the Foundry backend
-      6. attach a backend credential (managed identity, or pass the caller's token through)
+      3. GET /v1/models only: synthesise the model list from ARM and return it
+      4. enforce llm-token-limit (per-caller TPM budget → 429)
+      5. emit llm-emit-token-metric to Application Insights
+      6. select the Foundry backend
+      7. attach a backend credential (managed identity, or pass the caller's token through)
   → Foundry → Claude deployment
   → outbound: stamp x-gateway so the hop is provable
 ```
 
-The gateway is the control plane. The demo value is that everything in steps 1–6 is configurable at runtime through named values, so you can show three different security postures in a single session without redeploying.
+The gateway is the control plane. The demo value is that everything in steps 1–7 is configurable at runtime through named values, so you can show three different security postures in a single session without redeploying.
+
+Step 3 is the one capability the gateway *adds* rather than governs. Foundry's Anthropic surface answers `GET /v1/models` with `404 api_not_supported`, so Claude Desktop's **Model discovery** toggle cannot work on the direct path. The gateway answers the call itself — listing the account's Anthropic-format deployments over ARM with its own managed identity — so the client's model picker populates itself. Details in [04-claude-code-gateway.md → Model discovery](04-claude-code-gateway.md#model-discovery).
 
 ## Why these specific choices
 
@@ -78,6 +81,7 @@ The role assignment therefore exists **before** the API is published, so the fir
 | inbound | `choose` on `{{client-auth-mode}}` | Three client auth postures from one deployment |
 | inbound | `validate-azure-ad-token` | Entra token validation at the edge, before any spend |
 | inbound | `set-variable callerId` | Stable identity from the `oid`/`appid` claim, falling back to the subscription then the client IP |
+| inbound | `send-request` + `return-response` on `models-list` | Model discovery the backend cannot serve — authenticated, cached, and filtered to Anthropic-format deployments |
 | inbound | `llm-token-limit` | Per-caller tokens-per-minute budget with `Retry-After`, understands the Anthropic schema |
 | inbound | `llm-emit-token-metric` | Prompt/completion/total tokens dimensioned by caller into Application Insights |
 | inbound | `set-backend-service` | Backend abstraction — the seam where you would add load balancing or failover pools |
@@ -97,8 +101,11 @@ The role assignment therefore exists **before** the API is published, so the fir
 | `entra-tenant-id` | tenant GUID | Which tenant issues acceptable tokens |
 | `entra-audience` | e.g. `https://ai.azure.com` | Expected `aud` claim |
 | `foundry-token-resource` | e.g. `https://ai.azure.com` | Resource the gateway MI requests |
+| `foundry-deployments-uri` | ARM deployments URL | Source of the synthesised `/v1/models` list |
 
 Use `./scripts/Set-GatewayAuthMode.ps1` to change them. Changes take effect on the next request.
+
+Model discovery is a deploy-time switch rather than a named value, because turning it off changes which operations the policy short-circuits: `gatewayModelDiscovery` (default `true`) and `gatewayModelDiscoveryCacheSeconds` (default `300`).
 
 ## Observability
 

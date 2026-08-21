@@ -8,11 +8,20 @@
     x-gateway-tokens-remaining). Run it before demoing Claude Code so you know
     the endpoint, credential and RBAC are all working.
 
+    With -ListModels it calls GET /v1/models instead. That endpoint is a
+    gateway-only capability: Foundry's Anthropic surface answers 404
+    api_not_supported, while the gateway synthesises the list from the
+    account's Anthropic-format deployments. Running it in both modes is the
+    quickest way to show what the gateway adds.
+
 .EXAMPLE
     ./scripts/Test-ClaudeEndpoint.ps1 -Mode Direct -Auth Entra
 
 .EXAMPLE
     ./scripts/Test-ClaudeEndpoint.ps1 -Mode Gateway -Auth Key -Model claude-sonnet-4-6
+
+.EXAMPLE
+    ./scripts/Test-ClaudeEndpoint.ps1 -Mode Gateway -Auth Key -ListModels
 #>
 [CmdletBinding()]
 param(
@@ -24,6 +33,9 @@ param(
 
     [string]$Model,
     [string]$Prompt = 'Reply with exactly one short sentence confirming you are Claude running in Microsoft Foundry.',
+
+    [switch]$ListModels,
+
     [string]$OutputsFile
 )
 
@@ -44,7 +56,7 @@ if (-not $Model) { throw 'No model deployment found in the outputs. Pass -Model 
 $baseUrl = if ($Mode -eq 'Direct') { $o.foundryAnthropicBaseUrl } else { $o.gatewayAnthropicBaseUrl }
 if (-not $baseUrl) { throw "No base URL for mode '$Mode' in the deployment outputs." }
 
-$uri = "$($baseUrl.TrimEnd('/'))/v1/messages"
+$uri = if ($ListModels) { "$($baseUrl.TrimEnd('/'))/v1/models" } else { "$($baseUrl.TrimEnd('/'))/v1/messages" }
 
 $headers = @{
     'anthropic-version' = '2023-06-01'
@@ -104,7 +116,7 @@ $body = @{
 
 Write-Host ''
 '{0,-12} {1}' -f 'Endpoint:', $uri
-'{0,-12} {1}' -f 'Model:', $Model
+if (-not $ListModels) { '{0,-12} {1}' -f 'Model:', $Model }
 '{0,-12} {1}' -f 'Auth:', $Auth
 Write-Host ''
 
@@ -113,9 +125,14 @@ try {
     # depends on the Internet Explorer engine and throws "Windows PowerShell is in
     # NonInteractive mode" under automation. It is a harmless no-op on PowerShell 7+.
     # The body is sent as UTF-8 bytes so non-ASCII prompts are not mangled.
-    $response = Invoke-WebRequest -Uri $uri -Method Post -Headers $headers -TimeoutSec 120 `
-        -ContentType 'application/json' -UseBasicParsing `
-        -Body ([Text.Encoding]::UTF8.GetBytes($body))
+    if ($ListModels) {
+        $response = Invoke-WebRequest -Uri $uri -Method Get -Headers $headers -TimeoutSec 120 -UseBasicParsing
+    }
+    else {
+        $response = Invoke-WebRequest -Uri $uri -Method Post -Headers $headers -TimeoutSec 120 `
+            -ContentType 'application/json' -UseBasicParsing `
+            -Body ([Text.Encoding]::UTF8.GetBytes($body))
+    }
 }
 catch {
     $status = $_.Exception.Response.StatusCode.value__
@@ -129,7 +146,17 @@ catch {
             }
         }
         403 { Write-Host 'Hint: the credential is valid but not authorized. Role assignments can take a few minutes.' -ForegroundColor Yellow }
-        404 { Write-Host "Hint: the 'model' field must be the Foundry DEPLOYMENT name, not the model ID." -ForegroundColor Yellow }
+        404 {
+            if ($ListModels -and $Mode -eq 'Direct') {
+                Write-Host "Expected. Foundry's Anthropic surface does not implement /v1/models, which is why Claude Desktop's 'Model discovery' toggle only works through the gateway. Re-run with -Mode Gateway." -ForegroundColor Yellow
+            }
+            elseif ($ListModels) {
+                Write-Host 'Hint: model discovery is switched off at the gateway. Redeploy with gatewayModelDiscovery = true.' -ForegroundColor Yellow
+            }
+            else {
+                Write-Host "Hint: the 'model' field must be the Foundry DEPLOYMENT name, not the model ID." -ForegroundColor Yellow
+            }
+        }
         429 { Write-Host 'Hint: the gateway token-per-minute budget or the deployment capacity was exceeded.' -ForegroundColor Yellow }
     }
     throw
@@ -150,6 +177,30 @@ else {
 
 Write-Host 'SUCCESS' -ForegroundColor Green
 Write-Host ''
+
+if ($ListModels) {
+    if ($payload.data) {
+        $payload.data | ForEach-Object {
+            '{0,-26} {1}' -f $_.id, $_.created_at
+        }
+    }
+    else {
+        Write-Warning 'The endpoint returned an empty model list. See docs/07-troubleshooting.md.'
+    }
+    Write-Host ''
+    '{0,-26} {1}' -f 'Models returned:', @($payload.data).Count
+    if ($response.Headers.ContainsKey('x-gateway-synthesised')) {
+        '{0,-26} {1}' -f 'Synthesised by:', 'the gateway (Foundry does not implement this endpoint)'
+    }
+    foreach ($h in 'x-gateway', 'x-ms-region') {
+        if ($response.Headers.ContainsKey($h)) {
+            '{0,-26} {1}' -f "$($h):", ($response.Headers[$h] -join ', ')
+        }
+    }
+    Write-Host ''
+    return
+}
+
 Write-Host ($payload.content | Where-Object { $_.type -eq 'text' } | Select-Object -ExpandProperty text)
 Write-Host ''
 '{0,-26} {1}' -f 'Reported model:', $payload.model

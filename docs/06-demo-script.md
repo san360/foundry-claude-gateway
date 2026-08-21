@@ -201,6 +201,21 @@ Then bring it back to Claude Desktop:
 
 > "This also matters for the desktop app. Claude Code signs in as a Microsoft first-party client, so `az login` is enough. Claude Desktop needs its own app registration, and if your tenant blocks user consent, that sign-in stops dead at 'Need admin approval'. The key path is what unblocks a demo on the day; the admin grant is what you want for the rollout."
 
+## Act 5c — Something the gateway can do that Foundry can't (2 min)
+
+Everything so far has been the gateway *governing* traffic. This is the gateway *adding* a capability, and it lands well because it is two commands and an obvious difference.
+
+```powershell
+./scripts/Test-ClaudeEndpoint.ps1 -Mode Direct  -Auth Entra -ListModels   # 404
+./scripts/Test-ClaudeEndpoint.ps1 -Mode Gateway -Auth Key   -ListModels   # 200, lists the deployments
+```
+
+> "Same request, `GET /v1/models`. Foundry's Anthropic surface doesn't implement it, so it 404s — which is why Claude Desktop's *Model discovery* toggle is off on the direct path and you type your model names in by hand. Through the gateway it returns the list, because the gateway answers the call itself: it reads the account's deployments with its own managed identity and shapes them into Anthropic's format. Turn the toggle on and the model picker populates itself. Add a deployment in Foundry, and it shows up in the client without anyone touching a config file."
+
+If someone asks whether other Foundry models could be listed here:
+
+> "Deliberately not. This gateway speaks the Anthropic Messages API. Your GPT and Llama deployments live on a different Foundry surface with a different schema, so listing one here would put it in the picker and then fail on every request. The policy filters on `format == Anthropic` for that reason. Making them genuinely work is a translation layer — and streaming is where that gets hard."
+
 ## Act 6 — Close (1 min)
 
 | | Direct | Gateway |
@@ -213,6 +228,7 @@ Then bring it back to Claude Desktop:
 | Per-caller quota | ✗ | ✓ |
 | Cost attribution | ✗ | ✓ |
 | Central policy | ✗ | ✓ |
+| Model discovery (`GET /v1/models`) | ✗ — Foundry returns 404 | ✓ — synthesised by the gateway |
 
 > "Same models, same client, same API. Start direct for a pilot; put the gateway in front the moment you have more than one team, and the developers never notice — it is one environment variable."
 

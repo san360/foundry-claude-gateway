@@ -256,6 +256,41 @@ Expected behaviour: the per-caller `llm-token-limit` budget is spent. Check `x-g
 
 The request did not go through API Management. Check `ANTHROPIC_FOUNDRY_BASE_URL` — a stale `ANTHROPIC_FOUNDRY_RESOURCE` takes an entirely different route. The helper script clears one when setting the other.
 
+One exception: `GET /v1/models` responses have **no** `x-gateway` header. The discovery branch ends in `return-response`, which short-circuits the pipeline before the outbound section runs. Look for `x-gateway-synthesised: models-list` instead — it is set on the response itself.
+
+### `404 api_not_supported` on `GET /v1/models` — "Model discovery" fails
+
+Expected **on the direct path**. Foundry's Anthropic surface does not implement the models endpoint, so Claude Desktop's *Model discovery* toggle can never work against Foundry directly — leave it **off** there and list the deployment names by hand.
+
+Through the gateway it works, because the gateway synthesises the response from the account's deployments instead of forwarding the call. If you get a 404 *through the gateway*, discovery is switched off:
+
+```bicep
+gatewayModelDiscovery: true      // default
+```
+
+A successful discovery response carries `x-gateway-synthesised: models-list`. Check with:
+
+```powershell
+curl.exe -s -D- -o- "$env:GATEWAY_ANTHROPIC_BASE_URL/v1/models" -H "x-api-key: <subscription-key>"
+```
+
+### Model discovery returns `{"data":[]}`
+
+The gateway reached ARM but matched nothing. The filter is deliberately narrow — only deployments with `model.format == "Anthropic"` **and** `provisioningState == "Succeeded"` are listed, because non-Anthropic models do not speak the Messages API and would fail on every request if advertised. Confirm what ARM actually returns:
+
+```powershell
+az cognitiveservices account deployment list -n <account> -g <rg> `
+  --query "[].{name:name, format:properties.model.format, state:properties.provisioningState}" -o table
+```
+
+An empty list can also mean the ARM call itself failed — that path degrades silently by design, so the client keeps whatever models it already had rather than failing to launch. The gateway's managed identity needs **Cognitive Services User** on the Foundry account, which the template assigns; that role's `Microsoft.CognitiveServices/*/read` covers reading deployments.
+
+Newly added deployments can take up to `gatewayModelDiscoveryCacheSeconds` (default 300) to appear.
+
+### A model appears in Claude Desktop's picker but every request fails
+
+You are probably pointing at a non-Anthropic deployment. Foundry serves GPT, Llama and Mistral models on `/openai/v1/chat/completions` or `/models/chat/completions` with a different schema; this gateway publishes the **Anthropic Messages API** only. Gateway-side discovery filters those models out for exactly this reason — if one is showing up, it was added to the client's model list by hand.
+
 ## Claude Code
 
 ### `/status` shows `Anthropic API` instead of `Microsoft Foundry`
@@ -305,9 +340,20 @@ The tenant ID was typed into the **Client ID** box. Anthropic's own documentatio
 
 Verified failure mode, and the reason this repo supports key-based auth as a first-class scenario.
 
-The app registration requests delegated `user_impersonation` on Azure Cognitive Services. That scope is nominally user-consentable, but many tenants disable self-service consent outright (*Enterprise applications → Consent and permissions → Do not allow user consent*). When they do, **every** delegated permission needs an admin grant, regardless of the scope's own consent setting. If you are not a directory admin, you cannot proceed on the Entra path.
+The app registration requests delegated `user_impersonation` on Azure Cognitive Services. That scope is nominally user-consentable — but whether a user can actually approve it depends on the tenant's **user consent setting**, and the trap is that the common default *looks* permissive:
 
-Three options, in order of practicality:
+```powershell
+az rest --method GET `
+  --url "https://graph.microsoft.com/v1.0/policies/authorizationPolicy" `
+  --query "permissionGrantPolicyIdsAssignedToDefaultUserRole"
+```
+
+- `ManagePermissionGrantsForSelf.microsoft-user-default-low` — user consent is **on but restricted** to permissions classified *low impact*, which by default is only Microsoft Graph `User.Read`, `openid`, `profile`, `email`, `offline_access`. `user_impersonation` is not in that set, so consent is refused.
+- `[]` — user consent is off entirely; every delegated permission needs an admin.
+
+Either way you cannot proceed on the Entra path without a directory admin, and **the gateway does not help**: consent happens client-side at sign-in, before any request reaches API Management.
+
+Four options, in order of practicality:
 
 1. **Use the key scenario instead.** No app registration, no consent, no directory admin:
 
@@ -329,7 +375,9 @@ Three options, in order of practicality:
    https://login.microsoftonline.com/<tenant-id>/adminconsent?client_id=<app-client-id>
    ```
 
-3. **Use Claude Code instead of Claude Desktop for the Entra demo.** The CLI authenticates as a Microsoft first-party client through `az login`, so it needs no app registration and no consent at all. This is why `Test-ClaudeEndpoint.ps1 -Auth Entra` succeeds while the desktop app is still blocked.
+3. **Ask an admin to classify `user_impersonation` as low impact**, after which users consent for themselves per user, with individually revocable grants. A narrower change than blanket admin consent — see [05-entra-authentication.md → Consent](05-entra-authentication.md#consent--the-part-that-actually-blocks-people) for the command.
+
+4. **Use Claude Code instead of Claude Desktop for the Entra demo.** The CLI authenticates as a Microsoft first-party client through `az login`, so it needs no app registration and no consent at all. This is why `Test-ClaudeEndpoint.ps1 -Auth Entra` succeeds while the desktop app is still blocked.
 
 Note that consent is only half the story. Even after an admin grants it, the user still needs the **Cognitive Services User** role on the Foundry account, or every call returns `403`.
 
@@ -388,13 +436,19 @@ Check `inferenceProvider`. The Foundry keys (`inferenceFoundry*`) and the gatewa
 
 ### The model picker is empty or missing a model
 
-`modelDiscoveryEnabled` must be `false`: Foundry exposes no Anthropic model-listing endpoint, so discovery returns nothing and the app shows an empty list. `inferenceModels` is then authoritative, and each entry's `name` must be the **Foundry deployment name** — not the upstream Anthropic model ID:
+On the **Foundry provider** (`inferenceProvider = foundry`), `modelDiscoveryEnabled` must be `false`: Foundry exposes no Anthropic model-listing endpoint, so discovery returns nothing and the app shows an empty list. `inferenceModels` is then authoritative, and each entry's `name` must be the **Foundry deployment name** — not the upstream Anthropic model ID:
 
 ```json
 [{"name":"claude-sonnet-4-6","labelOverride":"claude-sonnet-4-6","anthropicFamilyTier":"sonnet"}]
 ```
 
 `anthropicFamilyTier` drives the app's own sonnet/haiku routing; omit it and the model may never be selected automatically.
+
+On the **gateway provider** you can set `modelDiscoveryEnabled = true`, which is what `New-ClaudeConfig.ps1 -Mode Gateway` now writes. The gateway synthesises `GET /v1/models` from the account's deployments, so the picker fills itself. Keep `inferenceModels` populated anyway — it is the fallback if discovery is later switched off at the gateway. If the picker is still empty in gateway mode, check the endpoint directly:
+
+```powershell
+./scripts/Test-ClaudeEndpoint.ps1 -Mode Gateway -Auth Key -ListModels
+```
 
 ## Deployment scripts
 

@@ -1,4 +1,4 @@
-### Claude on Microsoft Foundry - raw HTTP calls
+﻿### Claude on Microsoft Foundry - raw HTTP calls
 ### Open with the VS Code "REST Client" extension, or copy the equivalent curl
 ### commands from docs/07-troubleshooting.md.
 ###
@@ -104,7 +104,18 @@ Content-Type: application/json
 }
 
 
-### 7. List models available on the endpoint
+### 7. Model discovery - GATEWAY ONLY
+### Foundry's Anthropic surface does NOT implement /v1/models: the direct call
+### in 7b returns 404 api_not_supported. The gateway synthesises the response
+### from the account's Anthropic-format deployments, which is what makes Claude
+### Desktop's "Model discovery" toggle usable. A synthesised response carries
+### the header x-gateway-synthesised: models-list.
+GET {{gatewayBase}}/v1/models
+api-key: {{gatewayKey}}
+anthropic-version: 2023-06-01
+
+
+### 7b. The same call direct to Foundry - expected to return 404
 GET {{directBase}}/v1/models
 Authorization: Bearer {{entraToken}}
 anthropic-version: 2023-06-01

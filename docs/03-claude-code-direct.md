@@ -223,7 +223,7 @@ That does three things:
 | `inferenceFoundryAuthFlow` | `browser` | or `device-code` / `broker` |
 | `inferenceSessionLifetimeSec` | `86400` | Bounded by your own IdP session policy |
 | `inferenceModels` | JSON array | `name` is the Foundry **deployment name**; first entry is the default |
-| `modelDiscoveryEnabled` | `false` | Foundry has no Anthropic model-listing endpoint, so the list above is authoritative |
+| `modelDiscoveryEnabled` | `false` | Foundry has no Anthropic model-listing endpoint, so the list above is authoritative. Turning this on breaks the picker — discovery only works [through the gateway](04-claude-code-gateway.md#model-discovery) |
 
 > **The client ID trap.** Anthropic's own documentation screenshot shows a tenant ID typed into the *Client ID* box. That fails with `AADSTS700016 — Application not found in the directory`. The two fields take different GUIDs. `Set-ClaudeDesktopConfig.ps1` refuses to write a config where they match.
 
@@ -251,9 +251,9 @@ It configures:
 
 Entra wildcards the **port** of a `127.0.0.1` redirect but not the **path**. A bare `http://127.0.0.1` fails with `AADSTS50011`.
 
-`user_impersonation` on Cognitive Services is *nominally* a user-consentable scope, which is why much of the guidance on this says an ordinary user can approve it at first sign-in. That is only true in a tenant that permits self-service consent. Where an administrator has set *Enterprise applications → Consent and permissions → **Do not allow user consent***, the tenant-level setting wins and **every** delegated permission needs an admin grant — the scope's own consent classification stops mattering. Sign-in then dead-ends at *"Need admin approval"*, which no amount of retrying fixes.
+`user_impersonation` on Cognitive Services is *nominally* a user-consentable scope, which is why much of the guidance on this says an ordinary user can approve it at first sign-in. Whether that is true depends on the tenant's user consent setting. The common default — `ManagePermissionGrantsForSelf.microsoft-user-default-low` — leaves user consent **on** but restricts it to permissions an admin has classified as *low impact*, which out of the box is only a handful of Microsoft Graph scopes. `user_impersonation` is not among them, so the user cannot self-consent even though the setting reads as "user consent is allowed". A tenant set to *Do not allow user consent* fails the same way. Sign-in dead-ends at *"Need admin approval"*, which no amount of retrying fixes.
 
-So treat `-GrantAdminConsent` as required unless you know self-service consent is on:
+So treat `-GrantAdminConsent` as required unless you know self-service consent is on **and** the scope is classified low impact. [05-entra-authentication.md](05-entra-authentication.md#consent--the-part-that-actually-blocks-people) covers how to check which policy applies, and a third option — classifying the scope as low impact so users can consent for themselves.
 
 ```powershell
 # Needs Privileged Role Administrator or Global Administrator.
