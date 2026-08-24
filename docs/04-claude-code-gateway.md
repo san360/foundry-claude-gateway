@@ -18,6 +18,8 @@ Claude Code → https://<apim>.azure-api.net/anthropic/v1/messages
 | Clients hold zero Foundry credentials | ✗ | ✓ managed-identity swap |
 | Change auth posture without touching clients | ✗ | ✓ named values |
 | Prompt/response inspection | ✗ | ✓ App Insights body logging |
+| **Enforceable content guardrails** | ✗ — the Azure RAI filter does not run for Claude | ✓ Azure AI Content Safety, inbound |
+| Model discovery (`GET /v1/models`) | ✗ `404 api_not_supported` | ✓ synthesised from ARM |
 | Multi-backend routing, failover, retries | ✗ | ✓ backends and pools |
 | One endpoint for many models/providers | ✗ | ✓ |
 
@@ -168,6 +170,43 @@ Turn body logging down before anything resembling production — prompts routine
 ### Streaming
 
 `<forward-request buffer-response="false" timeout="240" />` is what keeps server-sent events flowing. Claude Code streams every request, so without it the client appears to hang and then dump the whole response at once. Sample 5 in `samples/rest/anthropic.http` demonstrates a streaming call through the gateway.
+
+### Content guardrails
+
+The most important governance feature here, because it covers a gap you cannot close any other way: **Azure's RAI content filter does not run for Claude in Foundry**. You can attach a `raiPolicyName` to the deployment, ARM will confirm it, and nothing will enforce it. On the direct path the only safety layer is Claude's own alignment, which returns refusals as `HTTP 200` — invisible to metrics and alerts.
+
+The gateway closes that gap. Inbound, before the backend is selected, the policy sends the caller's most recent user turn to **Azure AI Content Safety**:
+
+| Call | Catches |
+| --- | --- |
+| `POST /contentsafety/text:shieldPrompt` | jailbreaks and prompt-injection attempts |
+| `POST /contentsafety/text:analyze` | Hate, Sexual, Violence, SelfHarm scored 0–7 |
+
+Both are needed. Jailbreak prompts score **0** on every harm category, and harm prompts are **not** flagged as attacks — either check alone misses half of the probe corpus.
+
+Content Safety is served by the **same AIServices account** on the same hostname as the Claude deployments, and `Cognitive Services User` — which the gateway identity already holds — covers its data plane. No extra resource, no extra role assignment.
+
+A blocked request never reaches the model, so it costs zero model tokens:
+
+```http
+HTTP/1.1 403 Forbidden
+x-guardrail-blocked: violence:5
+x-guardrail-enforced-by: azure-ai-content-safety
+```
+
+An allowed request carries proof the check ran rather than being skipped:
+
+```http
+x-guardrail: checked:allow
+```
+
+Measured cost is about **93 ms** per request. Demonstrate it with:
+
+```powershell
+./scripts/Test-Guardrails.ps1 -PromptId jailbreak-dan -Mode Both -ShowResponse
+```
+
+Direct answers it. The gateway returns `403`. Full detail, tuning and the reproducible negative result for the platform filter: [08 — Guardrails](08-guardrails.md).
 
 ## Operations exposed
 
@@ -460,3 +499,19 @@ OpenAITokenLimitExceeded` and a `Retry-After` header mean the gateway, while a
 | Foundry direct | account key | **404** `api_not_supported` |
 
 The direct 404 is the point: it is the same request, and only the gateway can answer it. `POST /v1/messages` was re-tested alongside and still returns 200, confirming the discovery branch does not interfere with the inference path.
+
+### Guardrails — confirmed enforcing, and confirmed absent on the direct path
+
+The nine-prompt corpus in `scripts/guardrail-prompts.json`, run against the live deployment at severity threshold 4:
+
+| Prompt group | Direct to Foundry | Via the gateway |
+| --- | --- | --- |
+| 3 benign controls | **200** answered | **200** answered — no false positives |
+| 2 jailbreaks | **200** — one *answered outright*, one refused by the model | **403** `prompt_shield` on both |
+| 4 harm categories | **200** on all four, model refusals only | **403** on all four: `violence:5`, `hate:7`, `selfharm:5`, `sexual:6` |
+
+**Direct stopped 0 of 6. The gateway stopped 6 of 6 and allowed 3 of 3 benign prompts.**
+
+Separately confirmed, and the reason this section exists: a custom RAI policy named `claude-strict` — every harm category set to `blocking` at `severityThreshold: Low` on both prompt and completion, plus Jailbreak and Protected Material Text — was deployed and attached to `claude-haiku-4-5`. ARM reports `raiPolicyName: claude-strict`. A prompt that policy forbids still returned **200**. The platform filter is configured, reported, and inert.
+
+Latency, three runs each: direct 725 ms average, gateway 818 ms average — roughly **93 ms** for two Content Safety calls. Allowed responses carried `x-guardrail: checked:allow`.

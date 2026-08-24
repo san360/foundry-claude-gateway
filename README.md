@@ -23,10 +23,11 @@ flowchart LR
 
     subgraph Azure["Azure subscription"]
         subgraph APIM["Azure API Management (v2 tier)"]
-            POL["AI gateway policy<br/>validate-azure-ad-token<br/>llm-token-limit<br/>llm-emit-token-metric<br/>authentication-managed-identity"]
+            POL["AI gateway policy<br/>validate-azure-ad-token<br/>llm-token-limit<br/>llm-emit-token-metric<br/>content-safety guardrails<br/>authentication-managed-identity"]
         end
         subgraph FDY["Microsoft Foundry (AIServices)"]
             DEP["Claude deployments<br/>haiku / sonnet / opus"]
+            CS["Azure AI Content Safety<br/>shieldPrompt + analyze"]
         end
         AI["Application Insights<br/>+ Log Analytics"]
     end
@@ -37,6 +38,7 @@ flowchart LR
     SDK -- "1 direct" --> FDY
     CC -- "2 gateway<br/>/anthropic/v1/messages" --> APIM
     SDK -- "2 gateway" --> APIM
+    POL -- "screen prompt<br/>403 if blocked" --> CS
     APIM -- "managed identity token<br/>or passthrough" --> FDY
     ENTRA -. "bearer token" .-> CC
     ENTRA -. "validate" .-> POL
@@ -56,6 +58,9 @@ flowchart LR
 | APIM API + policy + backend + named values | Anthropic Messages API surface with governance and pluggable auth |
 | Log Analytics + Application Insights | Request tracing and per-caller token metrics |
 | Role assignments | `Cognitive Services User` for you and for the gateway managed identity |
+| RAI policy `claude-strict` | Deployed and attached as **evidence that it is not enforced** on the Anthropic surface � see [08 — Guardrails](docs/08-guardrails.md) |
+
+Azure AI Content Safety, which the gateway calls to enforce guardrails, is served by the **same AIServices account** on the same hostname — no extra resource, no extra role assignment.
 
 ## Quick start
 
@@ -91,6 +96,11 @@ claude
 #     This writes BOTH the Foundry and the gateway key, so switching to the
 #     gateway afterwards is an edit to inferenceProvider in .env.
 ./scripts/New-ClaudeConfig.ps1 -Mode Direct -CredentialKind static -Apply
+
+# 5. Prove the guardrails. Fires 9 probe prompts down both paths and reports
+#    who stopped each one. The gateway blocks all six attacks; the direct
+#    path blocks none of them.
+./scripts/Test-Guardrails.ps1
 ```
 
 On macOS or Linux use `source ./scripts/set-claude-code-env.sh direct entra` instead.
@@ -104,8 +114,9 @@ On macOS or Linux use `source ./scripts/set-claude-code-env.sh direct entra` ins
 | [03 — Claude Code direct](docs/03-claude-code-direct.md) | Every environment variable, model pinning, desktop app and CLI |
 | [04 — Claude Code via the AI gateway](docs/04-claude-code-gateway.md) | Gateway configuration, policy walkthrough, governance features |
 | [05 — Entra authentication](docs/05-entra-authentication.md) | **The auth matrix**: does Entra work for both paths, and how |
-| [06 — Demo script](docs/06-demo-script.md) | A 20-minute run-of-show with talk track and expected output |
+| [06 — Demo script](docs/06-demo-script.md) | A 25-minute run-of-show with talk track and expected output |
 | [07 — Troubleshooting](docs/07-troubleshooting.md) | Error-by-error diagnosis for both paths |
+| [08 — Guardrails](docs/08-guardrails.md) | **Why Azure's content filter does not apply to Claude**, and how the gateway enforces real ones |
 
 ## Repository layout
 
@@ -129,11 +140,14 @@ scripts/
   New-FoundryAppRegistration.ps1 create the Entra public-client app (idempotent)
   New-ClaudeConfig.ps1           write .env describing both providers, optionally apply
   Set-ClaudeDesktopConfig.ps1    apply .env to Claude Desktop; export reg/plist/JSON
+  Test-Guardrails.ps1            prove guardrails: gateway vs direct, side by side
+  guardrail-prompts.json         9-prompt probe corpus (3 benign controls, 6 attacks)
 .env.example                     annotated reference for every client setting
 samples/
   python/hello_claude.py         Anthropic SDK, all four path/credential combos
   rest/anthropic.http            raw HTTP requests for VS Code REST Client
 docs/                            see the table above
+  diagrams/architecture.drawio   architecture and guardrail user flow (2 pages)
 ```
 
 ## Key facts worth knowing before you demo
@@ -149,6 +163,7 @@ docs/                            see the table above
 - Tenant policy forces `disableLocalAuth = true` on Cognitive Services accounts, which kills every key-based path. The `SecurityControl=Ignore` tag exempts the resource; `allowLocalAuthExemption = true` applies it. ARM reports `Succeeded` either way, so verify the live resource, not the deployment.
 - The Foundry **Anthropic** surface expects `x-api-key`. `api-key` returns `401` with a message about an invalid subscription key, even though the key is fine. The Azure OpenAI surface of the same account is the other way round.
 - If Claude Desktop's Entra sign-in stops at **"Need admin approval"**, the tenant has disabled self-service consent. Use `-CredentialKind static`, or have an admin grant consent once.
+- **A polite refusal is not a guardrail.** Claude's refusals arrive as `HTTP 200` with `stop_reason: end_turn` — indistinguishable from a normal answer. An Azure filter block would be `HTTP 400` with `content_filter`, and you will never see one on the Anthropic surface. Testing guardrails by eyeballing the reply is the mistake this repo is built to expose.
 
 ## Deployment status � verified end to end
 
@@ -176,8 +191,14 @@ on 2026-08-21 (`eastus2`, API Management `BasicV2`, Foundry with `claude-haiku-4
 | Model discovery `GET /v1/models` via gateway (key and Entra) | `200`, both deployments, `x-gateway-synthesised: models-list` |
 | Model discovery `GET /v1/models` with no credential | `401` |
 | Model discovery `GET /v1/models` direct to Foundry | `404 api_not_supported` � gateway-only capability |
+| Guardrails � 6 harmful prompts via gateway | `403` on all six, `x-guardrail-blocked` names the detector |
+| Guardrails � same 6 prompts direct to Foundry | `200` on all six; **none stopped**, one jailbreak answered outright |
+| Guardrails � 3 benign control prompts, both paths | `200`, no false positives |
+| Custom RAI policy `claude-strict` (every category blocking at `Low`) | attached and confirmed by ARM, but **not enforced** on the Anthropic surface |
+| Allowed gateway traffic carries proof the check ran | `x-guardrail: checked:allow` |
+| Guardrail latency cost | ~93 ms (direct 725 ms, gateway 818 ms) |
 
-Four findings from that exercise are worth reading before you present this:
+Five findings from that exercise are worth reading before you present this:
 
 1. **Claude model versions are not uniform.** `claude-sonnet-4-6` publishes version `1`
    only, while `claude-haiku-4-5` and `claude-opus-4-8` publish version `2`. That is why
@@ -200,7 +221,17 @@ Four findings from that exercise are worth reading before you present this:
    `subscriptionRequired = false` and enforce credentials in policy instead, or
    Entra-only callers are rejected before `validate-azure-ad-token` is ever reached.
 
+5. **Azure's RAI content filter does not run for Claude.** `raiPolicyName` is accepted on
+   the deployment and echoed back by ARM, but nothing enforces it � a custom policy
+   blocking every category at the lowest threshold still let a mass-casualty prompt
+   through with `200`. Every refusal on the direct path is Claude's own alignment, wrapped
+   in a `200` that looks exactly like a normal answer, so it cannot be alerted on or
+   counted. The gateway closes this with Azure AI Content Safety, which needs **no extra
+   resource and no extra role assignment** because the same AIServices account serves it.
+   [docs/08-guardrails.md](docs/08-guardrails.md) has the proof and the reproduction.
+
 Full evidence, request/response transcripts and the exact error strings are in
 [docs/05-entra-authentication.md](docs/05-entra-authentication.md),
-[docs/04-claude-code-gateway.md](docs/04-claude-code-gateway.md) and
+[docs/04-claude-code-gateway.md](docs/04-claude-code-gateway.md),
+[docs/08-guardrails.md](docs/08-guardrails.md) and
 [docs/07-troubleshooting.md](docs/07-troubleshooting.md).

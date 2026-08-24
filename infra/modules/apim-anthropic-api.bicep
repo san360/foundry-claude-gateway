@@ -80,12 +80,44 @@ param modelDiscoveryCacheSeconds int = 300
 @description('Tokens per minute allowed per caller before the gateway returns 429.')
 param tokensPerMinute int = 20000
 
+@description('''
+Enforce prompt guardrails at the gateway using Azure AI Content Safety.
+
+This matters because Microsoft's platform RAI content filter does not execute
+for Anthropic-format deployments - raiPolicyName is accepted on the ARM resource
+but the runtime filter only intercepts the Azure OpenAI surface, so harmful
+prompts reach Claude and are answered by Claude's own refusal rather than being
+blocked by Azure. Enabling this makes the gateway call Content Safety
+(text:shieldPrompt and text:analyze) before the model, so a blocked prompt never
+reaches Claude and costs no model tokens.
+''')
+param enableGuardrails bool = true
+
+@description('Azure AI Content Safety base URL, without a trailing slash. The Foundry AIServices account serves this on its own host, so no separate resource is required.')
+param contentSafetyEndpoint string = ''
+
+@description('Resource the gateway managed identity requests a token for when calling Content Safety.')
+param contentSafetyTokenResource string = 'https://cognitiveservices.azure.com'
+
+@description('''
+Block the request when any Content Safety harm category scores at or above this
+severity. Scores use the EightSeverityLevels scale (0-7), so 2 is permissive,
+4 blocks medium and above, and 6 blocks only severe content.
+''')
+@minValue(1)
+@maxValue(7)
+param guardrailSeverityThreshold int = 4
+
 @description('Bytes of request and response body logged to Application Insights. 0 disables body logging. Maximum 8192.')
 @minValue(0)
 @maxValue(8192)
 param bodyLogBytes int = 8192
 
 var backendId = 'foundry-anthropic'
+
+// Guardrails need somewhere to send the prompt; without an endpoint the policy
+// branch stays off rather than failing every request.
+var guardrailsActive = enableGuardrails && !empty(contentSafetyEndpoint)
 
 // ARM's deployments collection for the Foundry account. Model discovery reads
 // this with the gateway's managed identity, which already holds Cognitive
@@ -98,15 +130,23 @@ var foundryDeploymentsUri = empty(foundryAccountResourceId)
 var policyXml = replace(
   replace(
     replace(
-      replace(loadTextContent('../policies/anthropic-api.xml'), '__TOKENS_PER_MINUTE__', string(tokensPerMinute)),
-      '__BACKEND_ID__',
-      backendId
+      replace(
+        replace(
+          replace(loadTextContent('../policies/anthropic-api.xml'), '__TOKENS_PER_MINUTE__', string(tokensPerMinute)),
+          '__BACKEND_ID__',
+          backendId
+        ),
+        '__MODEL_DISCOVERY__',
+        (enableModelDiscovery && !empty(foundryAccountResourceId)) ? 'enabled' : 'disabled'
+      ),
+      '__DISCOVERY_CACHE_SECONDS__',
+      string(modelDiscoveryCacheSeconds)
     ),
-    '__MODEL_DISCOVERY__',
-    (enableModelDiscovery && !empty(foundryAccountResourceId)) ? 'enabled' : 'disabled'
+    '__GUARDRAILS__',
+    guardrailsActive ? 'enabled' : 'disabled'
   ),
-  '__DISCOVERY_CACHE_SECONDS__',
-  string(modelDiscoveryCacheSeconds)
+  '__GUARDRAIL_SEVERITY_THRESHOLD__',
+  string(guardrailSeverityThreshold)
 )
 
 resource apim 'Microsoft.ApiManagement/service@2024-05-01' existing = {
@@ -191,6 +231,29 @@ resource nvFoundryDeploymentsUri 'Microsoft.ApiManagement/service/namedValues@20
   properties: {
     displayName: 'foundry-deployments-uri'
     value: empty(foundryDeploymentsUri) ? environment().resourceManager : foundryDeploymentsUri
+    secret: false
+  }
+}
+
+// Always created, even when guardrails are off, so the policy's {{...}}
+// references always resolve. An unresolved named value fails the whole policy
+// at apply time, not just the branch that uses it.
+resource nvContentSafetyEndpoint 'Microsoft.ApiManagement/service/namedValues@2024-05-01' = {
+  parent: apim
+  name: 'content-safety-endpoint'
+  properties: {
+    displayName: 'content-safety-endpoint'
+    value: empty(contentSafetyEndpoint) ? 'https://contentsafety.invalid' : contentSafetyEndpoint
+    secret: false
+  }
+}
+
+resource nvContentSafetyTokenResource 'Microsoft.ApiManagement/service/namedValues@2024-05-01' = {
+  parent: apim
+  name: 'content-safety-token-resource'
+  properties: {
+    displayName: 'content-safety-token-resource'
+    value: contentSafetyTokenResource
     secret: false
   }
 }
@@ -298,6 +361,8 @@ resource apiPolicy 'Microsoft.ApiManagement/service/apis/policies@2024-05-01' = 
     nvEntraAudienceAlt
     nvFoundryTokenResource
     nvFoundryDeploymentsUri
+    nvContentSafetyEndpoint
+    nvContentSafetyTokenResource
     foundryBackend
     opCreateMessage
     opCountTokens
@@ -394,3 +459,9 @@ output demoSubscriptionName string = demoSubscription.name
 
 @description('Header name that carries the API Management subscription key.')
 output subscriptionKeyHeader string = subscriptionKeyHeader
+
+@description('Whether the gateway enforces Azure AI Content Safety guardrails on inbound prompts.')
+output guardrailsEnabled bool = guardrailsActive
+
+@description('Severity at or above which a harm category blocks the request (EightSeverityLevels, 0-7).')
+output guardrailSeverityThreshold int = guardrailSeverityThreshold

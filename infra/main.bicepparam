@@ -93,3 +93,20 @@ param gatewaySubscriptionKeyHeader = 'x-api-key'
 // demo ("here is the actual system prompt"), but prompts routinely contain
 // source code — set to 0 for anything resembling production.
 param gatewayBodyLogBytes = 8192
+
+// Enforce Azure AI Content Safety on inbound prompts at the gateway. This is
+// what makes guardrails demonstrable: Azure's platform RAI filter does not run
+// for Anthropic-format deployments, so the direct path relies entirely on
+// Claude's own refusals while the gateway path blocks before the model is
+// called. Run scripts/Test-Guardrails.ps1 to see the contrast.
+param gatewayGuardrails = true
+
+// Harm severity that trips a block, on the 0-7 EightSeverityLevels scale.
+// 4 blocks medium and above, which is the closest analogue to the Azure OpenAI
+// default content filter.
+param gatewayGuardrailSeverityThreshold = 4
+
+// Attach a strict custom RAI policy to the Claude deployments. Deployed as
+// reproducible evidence rather than as a working control: ARM accepts and
+// reports the binding, but nothing enforces it on the Anthropic surface.
+param deployStrictRaiPolicy = true

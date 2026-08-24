@@ -153,6 +153,59 @@ resource additionalInferenceAccess 'Microsoft.Authorization/roleAssignments@2022
   }
 ]
 
+@description('''
+Deploy a deliberately strict custom RAI (content filter) policy and attach it to
+the Claude deployments.
+
+This exists as evidence, not as a working control. Azure accepts the policy and
+binds it to Anthropic-format deployments, but the runtime filter pipeline only
+intercepts the Azure OpenAI inference surface - not /anthropic/v1/messages. With
+every category blocking at the lowest severity threshold, a mass-casualty
+violence prompt still returns HTTP 200 and is answered by Claude's own refusal.
+Deploying it lets the demo prove that claim rather than assert it, and means the
+posture is already correct if Microsoft enables enforcement later. Real
+enforcement is done by the AI gateway - see docs/08-guardrails.md.
+''')
+param deployStrictRaiPolicy bool = true
+
+var strictRaiPolicyName = 'claude-strict'
+
+// Every harm category, blocking, on both prompt and completion, at the lowest
+// severity threshold the service accepts - the strictest policy expressible.
+var harmFilters = flatten(map(['Hate', 'Sexual', 'Violence', 'Selfharm'], category =>
+  map(['Prompt', 'Completion'], source => {
+    name: category
+    blocking: true
+    enabled: true
+    severityThreshold: 'Low'
+    source: source
+  })))
+
+resource strictRaiPolicy 'Microsoft.CognitiveServices/accounts/raiPolicies@2024-10-01' = if (deployStrictRaiPolicy) {
+  parent: account
+  name: strictRaiPolicyName
+  properties: {
+    mode: 'Blocking'
+    basePolicyName: 'Microsoft.DefaultV2'
+    contentFilters: concat(harmFilters, [
+      {
+        name: 'Jailbreak'
+        blocking: true
+        enabled: true
+        source: 'Prompt'
+      }
+      {
+        name: 'Protected Material Text'
+        blocking: true
+        enabled: true
+        source: 'Completion'
+      }
+    ])
+  }
+}
+
+var effectiveRaiPolicyName = deployStrictRaiPolicy ? strictRaiPolicyName : 'Microsoft.DefaultV2'
+
 resource haikuDeployment 'Microsoft.CognitiveServices/accounts/deployments@2025-10-01-preview' = if (!empty(haikuModel)) {
   parent: account
   name: haikuDeploymentName
@@ -166,6 +219,7 @@ resource haikuDeployment 'Microsoft.CognitiveServices/accounts/deployments@2025-
       name: haikuModel
       version: haikuModelVersion
     }
+    raiPolicyName: effectiveRaiPolicyName
     #disable-next-line BCP037
     modelProviderData: {
       organizationName: claudeOrganizationName
@@ -177,6 +231,7 @@ resource haikuDeployment 'Microsoft.CognitiveServices/accounts/deployments@2025-
     project
     userInferenceAccess
     additionalInferenceAccess
+    strictRaiPolicy
   ]
 }
 
@@ -193,6 +248,7 @@ resource sonnetDeployment 'Microsoft.CognitiveServices/accounts/deployments@2025
       name: sonnetModel
       version: sonnetModelVersion
     }
+    raiPolicyName: effectiveRaiPolicyName
     #disable-next-line BCP037
     modelProviderData: {
       organizationName: claudeOrganizationName
@@ -205,6 +261,7 @@ resource sonnetDeployment 'Microsoft.CognitiveServices/accounts/deployments@2025
     haikuDeployment
     userInferenceAccess
     additionalInferenceAccess
+    strictRaiPolicy
   ]
 }
 
@@ -221,6 +278,7 @@ resource opusDeployment 'Microsoft.CognitiveServices/accounts/deployments@2025-1
       name: opusModel
       version: opusModelVersion
     }
+    raiPolicyName: effectiveRaiPolicyName
     #disable-next-line BCP037
     modelProviderData: {
       organizationName: claudeOrganizationName
@@ -233,6 +291,7 @@ resource opusDeployment 'Microsoft.CognitiveServices/accounts/deployments@2025-1
     sonnetDeployment
     userInferenceAccess
     additionalInferenceAccess
+    strictRaiPolicy
   ]
 }
 
@@ -247,6 +306,18 @@ output anthropicBaseUrl string = 'https://${account.name}.services.ai.azure.com/
 
 @description('Foundry project endpoint.')
 output projectEndpoint string = 'https://${account.name}.services.ai.azure.com/api/projects/${project.name}'
+
+@description('''
+Azure AI Content Safety base URL. The AIServices account serves the Content
+Safety data plane on the same host as the Anthropic surface, so the AI gateway
+can enforce prompt guardrails without a separate resource. Callers need the
+Cognitive Services User role, whose Microsoft.CognitiveServices/* data action
+already covers it.
+''')
+output contentSafetyEndpoint string = 'https://${account.name}.services.ai.azure.com'
+
+@description('RAI content filter policy attached to the Claude deployments. Attached and reported by ARM, but not enforced on the Anthropic surface - see docs/08-guardrails.md.')
+output raiPolicyName string = effectiveRaiPolicyName
 
 output haikuDeploymentName string = haikuDeploymentName
 output sonnetDeploymentName string = sonnetDeploymentName

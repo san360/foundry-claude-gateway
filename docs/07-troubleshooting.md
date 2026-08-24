@@ -4,7 +4,7 @@
 
 1. Does the **raw HTTP** call work? `./scripts/Test-ClaudeEndpoint.ps1`. If it fails, the problem is Azure, not Claude Code.
 2. Is it **direct or gateway**? Test direct first; if direct fails, gateway cannot work.
-3. Is it **auth or routing**? `401`/`403` is auth; `404`/`405` is routing or a wrong model name.
+3. Is it **auth or routing**? `401`/`403` is auth; `404`/`405` is routing or a wrong model name. A `403` carrying `x-guardrail-blocked` is neither — it is a content guardrail, see [Gateway path](#403-forbidden-with-x-guardrail-blocked).
 4. Only then look at Claude Code environment variables.
 
 ## Deployment
@@ -239,6 +239,62 @@ Look at the `x-gateway-error` response header first.
   ```
 
 - `backend-auth-mode = passthrough`: the caller's token is being forwarded, so **the caller** needs `Cognitive Services User` — and the caller must actually be sending a token. Subscription-key-only callers cannot work in passthrough mode. Either grant the user the role or switch back to `managedIdentity`.
+
+### `403 Forbidden` with `x-guardrail-blocked`
+
+Working as designed: Azure AI Content Safety stopped the prompt at the gateway before it reached the model. The header names the verdict — `prompt_shield` for a jailbreak, or `<category>:<severity>` such as `violence:5`.
+
+If it is a **false positive** (security research, medical or legal work, threat modelling), raise the threshold:
+
+```powershell
+# infra/main.bicepparam
+param gatewayGuardrailSeverityThreshold = 6   # default 4, scale is 0-7
+./scripts/deploy.ps1
+```
+
+Confirm the change took, and that your benign prompts still pass:
+
+```powershell
+./scripts/Test-Guardrails.ps1 -Mode Gateway
+```
+
+To disable guardrails entirely, set `gatewayGuardrails = false` and redeploy.
+
+### Harmful prompts are not blocked at all
+
+Check which path you are on. **The direct path has no enforceable guardrails** — Azure's RAI content filter does not run on the Anthropic surface, even with a custom policy attached. Anything you saw refused there was Claude refusing, inside an `HTTP 200`. This is expected and documented in [08 — Guardrails](08-guardrails.md); it is the reason the gateway scenario exists.
+
+On the gateway path, work through:
+
+```powershell
+# 1. Are guardrails actually deployed?
+Get-Content .deployment-outputs.json | ConvertFrom-Json |
+  Select-Object gatewayGuardrailsEnabled, gatewayGuardrailSeverityThreshold
+
+# 2. Did the check run? Allowed responses carry this header.
+#    If it is missing, the policy block is not in the effective policy.
+./scripts/Test-Guardrails.ps1 -Mode Gateway -PromptId control-general -ShowResponse
+```
+
+If `x-guardrail` is absent on an allowed response, the deployed policy is stale — redeploy and compare the effective policy in the portal (APIM → APIs → anthropic → Design → All operations → Inbound) against `infra/policies/anthropic-api.xml`.
+
+If the header is present but harmful prompts still get through, the threshold is too high, or Content Safety is failing and the policy is **failing open** — see below.
+
+### Guardrails silently stop blocking
+
+Both Content Safety calls use `ignore-error="true"`, so if the service is unreachable, throttled, or the managed identity loses its role assignment, requests proceed unscreened rather than failing. That is deliberate for a demo, and wrong for production.
+
+Verify Content Safety is reachable and the identity still has access:
+
+```powershell
+$token = az account get-access-token --resource https://cognitiveservices.azure.com --query accessToken -o tsv
+$cs = (Get-Content .deployment-outputs.json | ConvertFrom-Json).contentSafetyEndpoint
+Invoke-RestMethod -Method Post -Uri "$cs/contentsafety/text:analyze?api-version=2024-09-01" `
+  -Headers @{ Authorization = "Bearer $token" } -ContentType 'application/json' `
+  -Body '{"text":"hello","outputType":"EightSeverityLevels"}'
+```
+
+To fail closed instead, set `ignore-error="false"` on both `send-request` elements in `infra/policies/anthropic-api.xml` and redeploy. Content Safety being down will then take the API down with it.
 
 ### `429` from the gateway
 

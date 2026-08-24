@@ -2,6 +2,10 @@
 
 ## The two paths
 
+> A rendered version of everything below — both paths, the policy pipeline and the
+> guardrail decision flow — is in [`diagrams/architecture.drawio`](diagrams/architecture.drawio)
+> (two pages; open with draw.io or the VS Code Draw.io Integration extension).
+
 Both paths speak the **Anthropic Messages API**. Nothing about the client payload changes between them — only the base URL and the credential. That is deliberate: it is what makes the gateway a drop-in insertion point rather than a migration.
 
 ### Path 1 — Direct
@@ -16,7 +20,9 @@ Claude Code / SDK
   → Claude deployment (GlobalStandard)
 ```
 
-Lowest latency, fewest moving parts, and per-user RBAC enforced natively by Foundry. What it does *not* give you: cross-user quotas, a single audit surface, prompt/response inspection, multi-backend routing or the ability to change policy without touching clients.
+Lowest latency, fewest moving parts, and per-user RBAC enforced natively by Foundry. What it does *not* give you: cross-user quotas, a single audit surface, prompt/response inspection, multi-backend routing, **enforceable content guardrails** or the ability to change policy without touching clients.
+
+The guardrail gap is the least obvious of those and the most consequential. Azure's RAI content filter does not run on this surface, so the only safety layer here is Claude's own alignment — which returns refusals as `HTTP 200` you cannot alert on. See [08 — Guardrails](08-guardrails.md).
 
 ### Path 2 — Via the AI gateway
 
@@ -29,15 +35,16 @@ Claude Code / SDK
       3. GET /v1/models only: synthesise the model list from ARM and return it
       4. enforce llm-token-limit (per-caller TPM budget → 429)
       5. emit llm-emit-token-metric to Application Insights
-      6. select the Foundry backend
-      7. attach a backend credential (managed identity, or pass the caller's token through)
+      6. screen the prompt with Azure AI Content Safety (jailbreak + harm severity) → 403
+      7. select the Foundry backend
+      8. attach a backend credential (managed identity, or pass the caller's token through)
   → Foundry → Claude deployment
-  → outbound: stamp x-gateway so the hop is provable
+  → outbound: stamp x-gateway and x-guardrail so the hop and the check are provable
 ```
 
-The gateway is the control plane. The demo value is that everything in steps 1–7 is configurable at runtime through named values, so you can show three different security postures in a single session without redeploying.
+The gateway is the control plane. The demo value is that everything in steps 1–8 is configurable at runtime through named values, so you can show three different security postures in a single session without redeploying.
 
-Step 3 is the one capability the gateway *adds* rather than governs. Foundry's Anthropic surface answers `GET /v1/models` with `404 api_not_supported`, so Claude Desktop's **Model discovery** toggle cannot work on the direct path. The gateway answers the call itself — listing the account's Anthropic-format deployments over ARM with its own managed identity — so the client's model picker populates itself. Details in [04-claude-code-gateway.md → Model discovery](04-claude-code-gateway.md#model-discovery).
+Steps 3 and 6 are the two capabilities the gateway *adds* rather than governs. Foundry's Anthropic surface answers `GET /v1/models` with `404 api_not_supported`, so Claude Desktop's **Model discovery** toggle cannot work on the direct path. The gateway answers the call itself — listing the account's Anthropic-format deployments over ARM with its own managed identity — so the client's model picker populates itself. Details in [04-claude-code-gateway.md → Model discovery](04-claude-code-gateway.md#model-discovery). Step 6 is covered below.
 
 ## Why these specific choices
 
@@ -84,12 +91,14 @@ The role assignment therefore exists **before** the API is published, so the fir
 | inbound | `send-request` + `return-response` on `models-list` | Model discovery the backend cannot serve — authenticated, cached, and filtered to Anthropic-format deployments |
 | inbound | `llm-token-limit` | Per-caller tokens-per-minute budget with `Retry-After`, understands the Anthropic schema |
 | inbound | `llm-emit-token-metric` | Prompt/completion/total tokens dimensioned by caller into Application Insights |
+| inbound | `send-request` × 2 to Azure AI Content Safety | **Guardrails the platform filter cannot provide for Claude** — jailbreak detection and harm severity scoring, before the model is called. See [08 — Guardrails](08-guardrails.md) |
 | inbound | `set-backend-service` | Backend abstraction — the seam where you would add load balancing or failover pools |
 | inbound | `choose` on `{{backend-auth-mode}}` | Credential swap vs. passthrough |
 | inbound | `authentication-managed-identity` | Zero stored secrets between gateway and model |
 | inbound | header hygiene | The gateway credential never reaches the model backend |
 | backend | `forward-request buffer-response="false"` | SSE streaming survives the hop |
 | outbound | `set-header x-gateway` | Visible proof the request traversed the gateway |
+| outbound | `set-header x-guardrail` | Proof the guardrail check ran and allowed the prompt, rather than being skipped |
 | on-error | `set-header x-gateway-error` | Fast diagnosis during a live demo |
 
 ### Named values you can flip at runtime
@@ -102,10 +111,26 @@ The role assignment therefore exists **before** the API is published, so the fir
 | `entra-audience` | e.g. `https://ai.azure.com` | Expected `aud` claim |
 | `foundry-token-resource` | e.g. `https://ai.azure.com` | Resource the gateway MI requests |
 | `foundry-deployments-uri` | ARM deployments URL | Source of the synthesised `/v1/models` list |
+| `content-safety-endpoint` | AIServices account URL | Where the guardrail checks are sent |
+| `content-safety-token-resource` | e.g. `https://cognitiveservices.azure.com` | Resource the gateway MI requests for Content Safety |
 
 Use `./scripts/Set-GatewayAuthMode.ps1` to change them. Changes take effect on the next request.
 
 Model discovery is a deploy-time switch rather than a named value, because turning it off changes which operations the policy short-circuits: `gatewayModelDiscovery` (default `true`) and `gatewayModelDiscoveryCacheSeconds` (default `300`).
+
+Guardrails are likewise deploy-time: `gatewayGuardrails` (default `true`) and `gatewayGuardrailSeverityThreshold` (default `4`, on Content Safety's 0–7 scale).
+
+## Guardrails, and where they are actually enforced
+
+Worth stating plainly in an architecture doc, because it drives the design: **Azure's RAI content filter does not execute on the Anthropic surface.** `raiPolicyName` is accepted on the deployment and returned by ARM, but a custom policy blocking every harm category at the lowest threshold still lets harmful prompts reach the model. This deployment includes such a policy (`claude-strict`) specifically so the negative result is reproducible.
+
+| Layer | Enforces | Auditable |
+| --- | --- | --- |
+| Gateway — Azure AI Content Safety in the inbound policy | Yes — `403` before the model is called | Yes: `x-guardrail-blocked` header plus Application Insights |
+| Platform — RAI policy on the deployment | No, for Claude | n/a |
+| Model — Anthropic's own alignment | Partly | No — a refusal is `HTTP 200`, shaped like any other answer |
+
+Content Safety is served by the **same AIServices account** that hosts the Claude deployments, on the same hostname, and `Cognitive Services User` already covers its data plane — so guardrails add no resource and no role assignment. Full evidence and tuning guidance: [08 — Guardrails](08-guardrails.md).
 
 ## Observability
 

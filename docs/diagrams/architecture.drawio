@@ -1,0 +1,236 @@
+<mxfile host="app.diagrams.net" agent="foundry-claude-gateway" type="device">
+  <diagram id="architecture" name="Architecture">
+    <mxGraphModel dx="1400" dy="900" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1300" pageHeight="740" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="title" value="Claude on Microsoft Foundry - two consumption paths, and where guardrails actually run" style="text;html=1;fontSize=17;fontStyle=1;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="40" y="18" width="1180" height="30" as="geometry" />
+        </mxCell>
+
+        <mxCell id="entra" value="Microsoft Entra ID&#10;identity, tokens and Azure RBAC" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="380" y="72" width="340" height="46" as="geometry" />
+        </mxCell>
+
+        <mxCell id="clients" value="Developer workstation" style="rounded=0;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#6c8ebf;dashed=1;verticalAlign=top;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="150" width="250" height="250" as="geometry" />
+        </mxCell>
+        <mxCell id="desktop" value="Claude Desktop" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="60" y="195" width="210" height="45" as="geometry" />
+        </mxCell>
+        <mxCell id="code" value="Claude Code CLI" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="60" y="250" width="210" height="45" as="geometry" />
+        </mxCell>
+        <mxCell id="script" value="Test-Guardrails.ps1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="60" y="305" width="210" height="45" as="geometry" />
+        </mxCell>
+
+        <mxCell id="apim" value="Azure API Management - AI gateway&#10;(inbound policy pipeline, in order)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#d79b00;verticalAlign=top;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="380" y="150" width="340" height="365" as="geometry" />
+        </mxCell>
+        <mxCell id="p1" value="1 - Authenticate caller&#10;Entra token or subscription key" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="400" y="200" width="300" height="42" as="geometry" />
+        </mxCell>
+        <mxCell id="p2" value="2 - Model discovery (GET /v1/models)&#10;synthesised from ARM deployments" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="400" y="250" width="300" height="42" as="geometry" />
+        </mxCell>
+        <mxCell id="p3" value="3 - Token rate limit per caller&#10;429 once the budget is spent" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="400" y="300" width="300" height="42" as="geometry" />
+        </mxCell>
+        <mxCell id="p4" value="4 - GUARDRAILS&#10;Azure AI Content Safety pre-flight&#10;blocks BEFORE the model is called" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;fontStyle=1;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="400" y="350" width="300" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="p5" value="5 - Swap credential for gateway&#10;managed identity, then forward" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="400" y="425" width="300" height="42" as="geometry" />
+        </mxCell>
+
+        <mxCell id="foundry" value="Microsoft Foundry - AIServices account" style="rounded=0;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#9673a6;verticalAlign=top;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="820" y="150" width="400" height="380" as="geometry" />
+        </mxCell>
+        <mxCell id="cs" value="Azure AI Content Safety&#10;text:shieldPrompt - jailbreak / injection&#10;text:analyze - hate, sexual, violence, self-harm&#10;same host, same account, no extra resource" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="845" y="192" width="350" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="api" value="Anthropic Messages API&#10;/anthropic/v1/messages" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="845" y="295" width="350" height="45" as="geometry" />
+        </mxCell>
+        <mxCell id="haiku" value="claude-haiku-4-5" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="845" y="360" width="165" height="42" as="geometry" />
+        </mxCell>
+        <mxCell id="sonnet" value="claude-sonnet-4-6" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1030" y="360" width="165" height="42" as="geometry" />
+        </mxCell>
+        <mxCell id="rai" value="RAI policy claude-strict - NOT ENFORCED&#10;Every category blocking at the lowest threshold.&#10;ARM accepts and reports the binding, but the filter&#10;pipeline never runs on the Anthropic surface." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="845" y="425" width="350" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="mon" value="Application Insights + Log Analytics&#10;token metrics per caller, guardrail verdicts, request trace" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="380" y="580" width="340" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="verdict" value="Measured on this deployment (9-prompt corpus, threshold 4)&#10;&#10;PATH A direct    0 of 6 harmful prompts stopped. One jailbreak was answered outright.&#10;                 Any refusal comes from Claude itself, inside HTTP 200 - nothing you control.&#10;&#10;PATH B gateway   6 of 6 blocked with HTTP 403 and x-guardrail-blocked, 3 of 3 benign allowed.&#10;                 Cost: about 93 ms. No model tokens are spent on a blocked prompt." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;align=left;spacingLeft=12;fontSize=11;verticalAlign=top;spacingTop=8;" vertex="1" parent="1">
+          <mxGeometry x="760" y="565" width="460" height="150" as="geometry" />
+        </mxCell>
+
+        <mxCell id="legend" value="Solid = path B, through the gateway     Dashed red = path A, direct to Foundry" style="text;html=1;fontSize=11;align=left;fontStyle=2" vertex="1" parent="1">
+          <mxGeometry x="40" y="660" width="360" height="20" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;strokeColor=#6c8ebf;strokeWidth=2;endArrow=block;" edge="1" parent="1" source="desktop" target="p1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;strokeColor=#6c8ebf;strokeWidth=2;endArrow=block;" edge="1" parent="1" source="code" target="p1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;strokeColor=#6c8ebf;strokeWidth=2;endArrow=block;" edge="1" parent="1" source="script" target="p1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e4" value="pre-flight check&#10;(managed identity)" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;strokeColor=#82b366;strokeWidth=3;endArrow=block;startArrow=block;fontSize=10;" edge="1" parent="1" source="p4" target="cs">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="760" y="380" />
+              <mxPoint x="760" y="232" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e5" value="allowed only" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;strokeColor=#d79b00;strokeWidth=2;endArrow=block;fontSize=10;" edge="1" parent="1" source="p5" target="api">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="785" y="446" />
+              <mxPoint x="785" y="318" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;strokeColor=#9673a6;endArrow=block;" edge="1" parent="1" source="api" target="haiku">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;strokeColor=#9673a6;endArrow=block;" edge="1" parent="1" source="api" target="sonnet">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e8" value="PATH A - direct: no gateway, no guardrail, no rate limit" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;dashed=1;strokeColor=#b85450;strokeWidth=2;endArrow=block;fontSize=10;fontColor=#b85450;exitX=1;exitY=0.9;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;verticalAlign=bottom;" edge="1" parent="1" source="clients" target="api">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="330" y="545" />
+              <mxPoint x="805" y="545" />
+              <mxPoint x="805" y="318" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e9" value="validate token" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;dashed=1;strokeColor=#6c8ebf;endArrow=block;fontSize=10;" edge="1" parent="1" source="entra" target="p1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e10" value="sign in" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;dashed=1;strokeColor=#6c8ebf;endArrow=block;fontSize=10;" edge="1" parent="1" source="clients" target="entra">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e11" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;dashed=1;strokeColor=#d6b656;endArrow=block;" edge="1" parent="1" source="apim" target="mon">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+
+  <diagram id="userflow" name="Guardrail user flow">
+    <mxGraphModel dx="1400" dy="900" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1150" pageHeight="900" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="t2" value="What happens to a single prompt" style="text;html=1;fontSize=17;fontStyle=1;align=center;" vertex="1" parent="1">
+          <mxGeometry x="40" y="16" width="1020" height="30" as="geometry" />
+        </mxCell>
+
+        <mxCell id="start" value="Client sends POST /v1/messages" style="rounded=1;arcSize=50;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="400" y="70" width="300" height="45" as="geometry" />
+        </mxCell>
+
+        <mxCell id="dpath" value="Which base URL&#10;is configured?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="465" y="145" width="170" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="dmodel" value="Straight to Claude in Foundry" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="80" y="270" width="220" height="45" as="geometry" />
+        </mxCell>
+        <mxCell id="drai" value="Azure RAI filter?&#10;Never runs on the Anthropic surface,&#10;even with a strict policy attached" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="80" y="345" width="220" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="dout" value="HTTP 200&#10;Either an answer or Claude's own refusal.&#10;Both look identical to your logs, metrics&#10;and policy - you control neither." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="60" y="440" width="260" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="gauth" value="Gateway: authenticate caller" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="450" y="270" width="300" height="42" as="geometry" />
+        </mxCell>
+        <mxCell id="gextract" value="Extract the most recent user turn&#10;(text blocks only, truncated to 9,000 chars)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="450" y="335" width="300" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="gshield" value="text:shieldPrompt&#10;attackDetected?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="490" y="410" width="220" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="ganalyze" value="text:analyze&#10;any category severity 4 or above?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="470" y="530" width="260" height="100" as="geometry" />
+        </mxCell>
+
+        <mxCell id="gblock" value="HTTP 403 - blocked at the gateway&#10;x-guardrail-blocked: prompt_shield&#10;or hate:7 / violence:5 / sexual:6 / selfharm:5&#10;&#10;The model was never called.&#10;No tokens spent. The verdict is logged." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;fontStyle=1;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="830" y="450" width="280" height="120" as="geometry" />
+        </mxCell>
+
+        <mxCell id="gforward" value="Swap credential for the gateway&#10;managed identity and forward to Claude" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="450" y="670" width="300" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="gok" value="HTTP 200 with x-guardrail: checked:allow&#10;plus x-gateway-tokens-remaining&#10;&#10;Proof the check ran, not just that nothing broke." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="430" y="760" width="340" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="f1" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;endArrow=block;" edge="1" parent="1" source="start" target="dpath">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f2" value="Foundry URL (path A)" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;endArrow=block;strokeColor=#b85450;fontSize=10;dashed=1;" edge="1" parent="1" source="dpath" target="dmodel">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="190" y="190" /></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="f3" value="gateway URL (path B)" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;endArrow=block;strokeColor=#82b366;fontSize=10;" edge="1" parent="1" source="dpath" target="gauth">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f4" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;endArrow=block;dashed=1;strokeColor=#b85450;" edge="1" parent="1" source="dmodel" target="drai">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f5" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;endArrow=block;dashed=1;strokeColor=#b85450;" edge="1" parent="1" source="drai" target="dout">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f6" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;endArrow=block;" edge="1" parent="1" source="gauth" target="gextract">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f7" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;endArrow=block;" edge="1" parent="1" source="gextract" target="gshield">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f8" value="yes" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;endArrow=block;strokeColor=#b85450;fontSize=10;" edge="1" parent="1" source="gshield" target="gblock">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f9" value="no" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;endArrow=block;fontSize=10;" edge="1" parent="1" source="gshield" target="ganalyze">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f10" value="yes" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;endArrow=block;strokeColor=#b85450;fontSize=10;" edge="1" parent="1" source="ganalyze" target="gblock">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="970" y="580" /></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="f11" value="no" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;endArrow=block;strokeColor=#82b366;fontSize=10;" edge="1" parent="1" source="ganalyze" target="gforward">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="f12" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=1;endArrow=block;strokeColor=#82b366;" edge="1" parent="1" source="gforward" target="gok">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

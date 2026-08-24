@@ -1,6 +1,6 @@
 # 06 — Demo script
 
-A 20-minute run of show. Everything below has been rehearsed against the deployed template; timings assume the environment is already deployed and warm.
+A 25-minute run of show. Everything below has been rehearsed against the deployed template; timings assume the environment is already deployed and warm.
 
 ## Before you start
 
@@ -8,6 +8,7 @@ A 20-minute run of show. Everything below has been rehearsed against the deploye
 - [ ] `az login` done, correct subscription selected.
 - [ ] `./scripts/Test-ClaudeEndpoint.ps1 -Mode Direct -Auth Entra` passes.
 - [ ] `./scripts/Test-ClaudeEndpoint.ps1 -Mode Gateway -Auth Entra` passes.
+- [ ] `./scripts/Test-Guardrails.ps1` passes — run it once beforehand, it is the longest act.
 - [ ] `./scripts/Set-GatewayAuthMode.ps1 -ClientAuth either -BackendAuth managedIdentity`.
 - [ ] Application Insights open in a browser tab, Logs blade ready.
 - [ ] Foundry portal open on the deployments blade.
@@ -15,6 +16,8 @@ A 20-minute run of show. Everything below has been rehearsed against the deploye
 - [ ] Font size up. Clear terminal history so the `/status` output is visible.
 
 Warm the model with one throwaway request; first-token latency on a cold deployment makes the demo feel slow.
+
+Act 5d fires deliberately harmful probe prompts at the models. Know your audience, and say up front that they are canned safety-test strings from `scripts/guardrail-prompts.json` — not improvised.
 
 ## Act 1 — Claude models in Foundry (3 min)
 
@@ -216,12 +219,63 @@ If someone asks whether other Foundry models could be listed here:
 
 > "Deliberately not. This gateway speaks the Anthropic Messages API. Your GPT and Llama deployments live on a different Foundry surface with a different schema, so listing one here would put it in the picker and then fail on every request. The policy filters on `format == Anthropic` for that reason. Making them genuinely work is a translation layer — and streaming is where that gets hard."
 
+## Act 5d — Guardrails, and why the direct path has none (4 min)
+
+The strongest beat in the deck, because it is a genuine finding rather than a feature tour, and the audience can watch it happen.
+
+Set it up before running anything:
+
+> "Foundry lets you attach a Responsible AI content filter policy to a deployment. We attached one — every harm category, blocking, at the lowest possible threshold. Azure accepts it. Let's see what it does."
+
+```powershell
+./scripts/Test-Guardrails.ps1 -PromptId harm-violence -Mode Direct -ShowResponse
+```
+
+`REACHED-MODEL`. Claude declines politely, but the request was never filtered — and pause on the status code:
+
+> "Two hundred. Not four hundred. If Azure's filter had blocked this you'd get a 400 with `content_filter` in it, and that would show up in your logs, your alerts and your compliance report. This is a 200 with `stop_reason: end_turn` — byte for byte the same shape as a successful answer. Claude declined, on its own, and your monitoring has no idea anything happened."
+
+Then the one that lands hardest:
+
+```powershell
+./scripts/Test-Guardrails.ps1 -PromptId jailbreak-dan -Mode Direct -ShowResponse
+```
+
+> "That one it just answered. Model alignment is good, but it is not a control you own, not a control you configured, and not a control you can evidence to an auditor."
+
+Now the same two prompts through the gateway:
+
+```powershell
+./scripts/Test-Guardrails.ps1 -PromptId jailbreak-dan  -Mode Gateway -ShowResponse
+./scripts/Test-Guardrails.ps1 -PromptId harm-violence -Mode Gateway -ShowResponse
+```
+
+> "403, before the model was ever called — so it cost zero tokens. And the header tells you exactly why: `x-guardrail-blocked: prompt_shield` for the jailbreak, `violence:5` for the other. That's Azure AI Content Safety, running in the API Management policy. Two checks: Prompt Shields for jailbreaks, and severity scoring across four harm categories. You need both — the jailbreak scores zero on every harm category, and the harmful prompt isn't flagged as an attack."
+
+Finish with the whole corpus, which is the slide-worthy moment:
+
+```powershell
+./scripts/Test-Guardrails.ps1
+```
+
+| | Direct | Gateway |
+| --- | --- | --- |
+| Harmful prompts stopped before the model | **0 of 6** | **6 of 6** |
+| Benign prompts allowed | 3 of 3 | 3 of 3 |
+
+> "Nothing benign was blocked — including 'explain SQL injection and how to prevent it', which a badly tuned filter would kill and make the tool useless for security work. Ninety-three milliseconds of overhead. No extra resource and no extra role assignment: Content Safety runs on the same Foundry account, and the gateway's managed identity already had the permission."
+
+Two questions you should expect:
+
+- **"Will Microsoft fix this?"** — Possibly; treat it as point-in-time. The Bicep already declares the strict policy, so if enforcement is enabled you inherit it, and `Test-Guardrails.ps1` will start reporting `BLOCKED-PLATFORM` instead of `REACHED-MODEL`. Re-run it after Foundry updates.
+- **"What about the model's responses?"** — Inbound only, deliberately. Claude Code streams every request, and inspecting responses means buffering them, which breaks streaming for the primary client. Honest limitation, documented in [08 — Guardrails](08-guardrails.md).
+
 ## Act 6 — Close (1 min)
 
 | | Direct | Gateway |
 | --- | --- | --- |
 | Setup | 2 environment variables | 2 environment variables |
-| Latency | lowest | one extra hop |
+| Latency | lowest | one extra hop (~93 ms with guardrails) |
 | Entra auth | ✓ | ✓ (two topologies) |
 | Keyless | ✓ | ✓ |
 | Key auth, if you need it | shared account key | per-consumer, revocable |
@@ -229,6 +283,7 @@ If someone asks whether other Foundry models could be listed here:
 | Cost attribution | ✗ | ✓ |
 | Central policy | ✗ | ✓ |
 | Model discovery (`GET /v1/models`) | ✗ — Foundry returns 404 | ✓ — synthesised by the gateway |
+| Enforceable content guardrails | ✗ — the Azure filter does not run for Claude | ✓ — Content Safety, 6 of 6 blocked |
 
 > "Same models, same client, same API. Start direct for a pilot; put the gateway in front the moment you have more than one team, and the developers never notice — it is one environment variable."
 
@@ -241,6 +296,8 @@ If someone asks whether other Foundry models could be listed here:
 | 401 direct | RBAC propagation. Fall back to `-Auth Key`. |
 | 401 gateway | Wrong subscription-key header. Switch to `-Auth Entra`. |
 | 429 unexpectedly | Previous run consumed the budget. Wait 60s or raise the limit. |
+| Guardrail blocks something benign | Expected on a tuned-tight threshold — say so, then run `-PromptId control-security-topic` to show it does not block security topics. |
+| Guardrail blocks nothing on the gateway | Check `gatewayGuardrailsEnabled` in `.deployment-outputs.json`; the policy fails open if Content Safety is unreachable. |
 | Gateway slow to first token | Cold start. Always warm it before the demo. |
 
 Full details in [07 — Troubleshooting](07-troubleshooting.md).

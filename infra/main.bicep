@@ -176,6 +176,34 @@ param gatewayModelDiscovery bool = true
 @maxValue(3600)
 param gatewayModelDiscoveryCacheSeconds int = 300
 
+@description('''
+Enforce prompt guardrails at the gateway with Azure AI Content Safety.
+
+Azure's platform RAI content filter does not run for Anthropic-format
+deployments, so a harmful prompt sent straight to Foundry reaches Claude and is
+answered by Claude's own refusal rather than blocked by the platform. With this
+on, the gateway calls Content Safety (prompt shields plus harm-category scoring)
+before the model, so blocked prompts never reach Claude and consume no model
+tokens. This is the difference the gateway scenario demonstrates.
+''')
+param gatewayGuardrails bool = true
+
+@description('''
+Block a request when any Content Safety harm category scores at or above this
+severity, on the EightSeverityLevels scale (0-7). 2 is permissive, 4 blocks
+medium and above, 6 blocks only severe content.
+''')
+@minValue(1)
+@maxValue(7)
+param gatewayGuardrailSeverityThreshold int = 4
+
+@description('''
+Deploy a strict custom RAI policy and attach it to the Claude deployments. Kept
+as reproducible evidence: Azure accepts and reports the binding, but does not
+enforce it on the Anthropic surface. See docs/08-guardrails.md.
+''')
+param deployStrictRaiPolicy bool = true
+
 // -----------------------------------------------------------------------------
 
 var uniqueSuffix = take(uniqueString(subscription().subscriptionId, resourceGroupName), 6)
@@ -253,6 +281,7 @@ module foundry 'modules/foundry.bicep' = {
     principalType: principalType
     additionalInferencePrincipalIds: deployGateway ? [apim!.outputs.principalId] : []
     disableLocalAuth: disableFoundryLocalAuth
+    deployStrictRaiPolicy: deployStrictRaiPolicy
   }
 }
 
@@ -281,6 +310,12 @@ module gatewayApi 'modules/apim-anthropic-api.bicep' = if (deployGateway) {
     // them, so the check is delegated to the policy for any mode that permits Entra.
     subscriptionRequired: gatewayClientAuthMode == 'subscriptionKey'
     bodyLogBytes: gatewayBodyLogBytes
+    enableGuardrails: gatewayGuardrails
+    // The AIServices account serves Content Safety on its own host, so the
+    // gateway needs no separate resource - and its managed identity already
+    // holds Cognitive Services User, which covers the data plane.
+    contentSafetyEndpoint: foundry.outputs.contentSafetyEndpoint
+    guardrailSeverityThreshold: gatewayGuardrailSeverityThreshold
   }
 }
 
@@ -330,3 +365,15 @@ output opusDeploymentName string = foundry.outputs.opusDeploymentName
 
 @description('Application Insights component used for gateway token metrics.')
 output appInsightsName string = monitoring.outputs.appInsightsName
+
+@description('Azure AI Content Safety endpoint. Served by the Foundry account itself, and used by the gateway to enforce prompt guardrails.')
+output contentSafetyEndpoint string = foundry.outputs.contentSafetyEndpoint
+
+@description('RAI policy attached to the Claude deployments. Reported by ARM but NOT enforced on the Anthropic surface - the gateway is the enforcement point. See docs/08-guardrails.md.')
+output raiPolicyName string = foundry.outputs.raiPolicyName
+
+@description('Whether the gateway enforces Azure AI Content Safety guardrails on inbound prompts.')
+output gatewayGuardrailsEnabled bool = deployGateway ? gatewayApi!.outputs.guardrailsEnabled : false
+
+@description('Harm severity (0-7) at or above which the gateway blocks a prompt.')
+output gatewayGuardrailSeverityThreshold int = deployGateway ? gatewayApi!.outputs.guardrailSeverityThreshold : 0

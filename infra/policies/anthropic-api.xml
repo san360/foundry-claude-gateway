@@ -14,9 +14,11 @@
     {{entra-audience}}          expected "aud" claim on inbound Entra tokens
     {{foundry-token-resource}}  resource the gateway managed identity requests
     {{foundry-deployments-uri}} ARM deployments collection, read for discovery
+    {{content-safety-endpoint}} Azure AI Content Safety base URL for guardrails
 
-  __TOKENS_PER_MINUTE__, __BACKEND_ID__, __MODEL_DISCOVERY__ and
-  __DISCOVERY_CACHE_SECONDS__ are substituted at deploy time by
+  __TOKENS_PER_MINUTE__, __BACKEND_ID__, __MODEL_DISCOVERY__,
+  __DISCOVERY_CACHE_SECONDS__, __GUARDRAILS__ and
+  __GUARDRAIL_SEVERITY_THRESHOLD__ are substituted at deploy time by
   infra/modules/apim-anthropic-api.bicep.
 
   Note: C# string literals inside XML attributes must be escaped as &quot;.
@@ -210,6 +212,217 @@
       <dimension name="OperationId" value="@(context.Operation.Id)" />
     </llm-emit-token-metric>
 
+    <!--
+      STEP 2b - Prompt guardrails (Azure AI Content Safety).
+
+      This is the layer that actually enforces. Microsoft's platform RAI
+      content filter does NOT execute for Anthropic-format deployments: the
+      raiPolicyName property is accepted on the ARM resource but the runtime
+      filter pipeline only intercepts the Azure OpenAI inference surface, not
+      /anthropic/v1/messages. A prompt that should trip a blocking filter
+      reaches Claude and is answered with Claude's own refusal (HTTP 200,
+      stop_reason "end_turn") rather than an Azure block. See docs/08-guardrails.md.
+
+      So the gateway calls Content Safety explicitly, before the model:
+        text:shieldPrompt  - jailbreak / prompt-injection detection
+        text:analyze       - Hate, Sexual, Violence, SelfHarm severity scoring
+
+      Content Safety is served by the same Foundry account host, and the
+      gateway's managed identity already holds Cognitive Services User, whose
+      data action Microsoft.CognitiveServices/* covers it - no extra resource
+      and no extra role assignment.
+
+      Placed after token governance so a caller cannot use blocked prompts to
+      amplify Content Safety calls, and before set-backend-service so a blocked
+      prompt costs no model tokens.
+
+      Both calls use ignore-error="true": if Content Safety is unreachable the
+      request is allowed through (fail open) to keep the demo available. Set
+      ignore-error="false" to fail closed instead.
+    -->
+    <choose>
+      <when condition="@(&quot;__GUARDRAILS__&quot; == &quot;enabled&quot; &amp;&amp; context.Request.Method == &quot;POST&quot;)">
+        <!--
+          Inspect only the most recent user turn. Claude Code sends a large
+          system prompt and full tool definitions on every call; the user turn
+          is the part that carries caller intent, and keeping to it stays
+          inside the 10,000 character Content Safety limit.
+        -->
+        <set-variable name="guardrailPrompt" value="@{
+            var sb = new System.Text.StringBuilder();
+            try
+            {
+                // preserveContent: true - the body must survive for the backend.
+                var body = context.Request.Body.As&lt;JObject&gt;(true);
+                var messages = body[&quot;messages&quot;] as JArray;
+                if (messages != null)
+                {
+                    for (int i = messages.Count - 1; i &gt;= 0; i--)
+                    {
+                        var message = messages[i];
+                        if ((string)message[&quot;role&quot;] != &quot;user&quot;) { continue; }
+
+                        var content = message[&quot;content&quot;];
+                        if (content == null) { break; }
+
+                        // content is either a bare string or an array of blocks.
+                        if (content.Type == JTokenType.String)
+                        {
+                            sb.Append((string)content);
+                        }
+                        else
+                        {
+                            var blocks = content as JArray;
+                            if (blocks != null)
+                            {
+                                foreach (var block in blocks)
+                                {
+                                    if ((string)block[&quot;type&quot;] == &quot;text&quot;)
+                                    {
+                                        sb.Append((string)block[&quot;text&quot;]).Append(&quot;\n&quot;);
+                                    }
+                                }
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                // Unparseable body: leave the prompt empty so the guardrail is
+                // skipped rather than failing an otherwise valid request.
+            }
+            var text = sb.ToString().Trim();
+            return text.Length &gt; 9000 ? text.Substring(0, 9000) : text;
+        }" />
+
+        <choose>
+          <!-- Nothing to inspect (tool results only, or a non-Messages body). -->
+          <when condition="@(((string)context.Variables[&quot;guardrailPrompt&quot;]).Length &gt; 0)">
+            <authentication-managed-identity resource="{{content-safety-token-resource}}" output-token-variable-name="contentSafetyToken" ignore-error="false" />
+
+            <send-request mode="new" response-variable-name="shieldResponse" timeout="10" ignore-error="true">
+              <set-url>{{content-safety-endpoint}}/contentsafety/text:shieldPrompt?api-version=2024-09-01</set-url>
+              <set-method>POST</set-method>
+              <set-header name="Authorization" exists-action="override">
+                <value>@("Bearer " + (string)context.Variables["contentSafetyToken"])</value>
+              </set-header>
+              <set-header name="Content-Type" exists-action="override">
+                <value>application/json</value>
+              </set-header>
+              <set-body>@{
+                  var payload = new JObject();
+                  payload["userPrompt"] = (string)context.Variables["guardrailPrompt"];
+                  payload["documents"] = new JArray();
+                  return payload.ToString(Newtonsoft.Json.Formatting.None);
+              }</set-body>
+            </send-request>
+
+            <send-request mode="new" response-variable-name="analyzeResponse" timeout="10" ignore-error="true">
+              <set-url>{{content-safety-endpoint}}/contentsafety/text:analyze?api-version=2024-09-01</set-url>
+              <set-method>POST</set-method>
+              <set-header name="Authorization" exists-action="override">
+                <value>@("Bearer " + (string)context.Variables["contentSafetyToken"])</value>
+              </set-header>
+              <set-header name="Content-Type" exists-action="override">
+                <value>application/json</value>
+              </set-header>
+              <set-body>@{
+                  var payload = new JObject();
+                  payload["text"] = (string)context.Variables["guardrailPrompt"];
+                  var categories = new JArray();
+                  categories.Add("Hate");
+                  categories.Add("Sexual");
+                  categories.Add("Violence");
+                  categories.Add("SelfHarm");
+                  payload["categories"] = categories;
+                  // 0-7 rather than 0/2/4/6, so the threshold can be tuned finely.
+                  payload["outputType"] = "EightSeverityLevels";
+                  return payload.ToString(Newtonsoft.Json.Formatting.None);
+              }</set-body>
+            </send-request>
+
+            <!--
+              Verdict is "allow", "prompt_shield", or "<category>:<severity>".
+              It is carried to the caller on a response header either way, so a
+              demo can prove the check ran on allowed traffic too.
+            -->
+            <set-variable name="guardrailVerdict" value="@{
+                try
+                {
+                    var shield = (IResponse)context.Variables[&quot;shieldResponse&quot;];
+                    if (shield != null &amp;&amp; shield.StatusCode == 200)
+                    {
+                        var analysis = shield.Body.As&lt;JObject&gt;()[&quot;userPromptAnalysis&quot;];
+                        if (analysis != null &amp;&amp; (bool)analysis[&quot;attackDetected&quot;])
+                        {
+                            return &quot;prompt_shield&quot;;
+                        }
+                    }
+                }
+                catch (Exception) { }
+
+                try
+                {
+                    var analyze = (IResponse)context.Variables[&quot;analyzeResponse&quot;];
+                    if (analyze != null &amp;&amp; analyze.StatusCode == 200)
+                    {
+                        var categories = analyze.Body.As&lt;JObject&gt;()[&quot;categoriesAnalysis&quot;] as JArray;
+                        if (categories != null)
+                        {
+                            foreach (var category in categories)
+                            {
+                                var severity = (int)category[&quot;severity&quot;];
+                                if (severity &gt;= __GUARDRAIL_SEVERITY_THRESHOLD__)
+                                {
+                                    return ((string)category[&quot;category&quot;]).ToLowerInvariant() + &quot;:&quot; + severity.ToString();
+                                }
+                            }
+                        }
+                    }
+                }
+                catch (Exception) { }
+
+                return &quot;allow&quot;;
+            }" />
+
+            <choose>
+              <when condition="@(((string)context.Variables[&quot;guardrailVerdict&quot;]) != &quot;allow&quot;)">
+                <return-response>
+                  <set-status code="403" reason="Forbidden" />
+                  <set-header name="Content-Type" exists-action="override">
+                    <value>application/json</value>
+                  </set-header>
+                  <!-- Machine-readable signal for dashboards and the test harness. -->
+                  <set-header name="x-guardrail-blocked" exists-action="override">
+                    <value>@((string)context.Variables["guardrailVerdict"])</value>
+                  </set-header>
+                  <set-header name="x-guardrail-enforced-by" exists-action="override">
+                    <value>azure-ai-content-safety</value>
+                  </set-header>
+                  <set-body>@{
+                      var verdict = (string)context.Variables["guardrailVerdict"];
+                      var reason = verdict == "prompt_shield"
+                          ? "a prompt injection or jailbreak attempt was detected"
+                          : "the prompt scored at or above the configured harm threshold (" + verdict + ")";
+                      var error = new JObject();
+                      error["type"] = "permission_error";
+                      error["message"] = "Blocked by the AI gateway before the request reached the model: " + reason
+                          + ". Enforced by Azure AI Content Safety, not by the model's own refusal behaviour.";
+                      var root = new JObject();
+                      root["type"] = "error";
+                      root["error"] = error;
+                      return root.ToString(Newtonsoft.Json.Formatting.None);
+                  }</set-body>
+                </return-response>
+              </when>
+            </choose>
+          </when>
+        </choose>
+      </when>
+    </choose>
+
     <!-- STEP 3 - Backend routing and backend identity. -->
     <set-backend-service backend-id="__BACKEND_ID__" />
 
@@ -263,6 +476,13 @@
     <!-- Makes the gateway hop visible during the demo without altering the payload. -->
     <set-header name="x-gateway" exists-action="override">
       <value>azure-api-management</value>
+    </set-header>
+    <!--
+      Prove the guardrail ran even when it allowed the request through, so a
+      demo can distinguish "checked and allowed" from "never inspected".
+    -->
+    <set-header name="x-guardrail" exists-action="override">
+      <value>@(context.Variables.ContainsKey("guardrailVerdict") ? "checked:" + (string)context.Variables["guardrailVerdict"] : "not-inspected")</value>
     </set-header>
   </outbound>
 
