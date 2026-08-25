@@ -2,7 +2,7 @@
 
 A 25-minute run of show. Everything below has been rehearsed against the deployed template; timings assume the environment is already deployed and warm.
 
-For the prompts themselves — every scenario, with expected output and the reason each one is worth showing — see [09 — Test prompts](09-test-prompts.md). This document is the *timing and narrative*; that one is the *material*.
+For the prompts themselves — every scenario, with expected output and the reason each one is worth showing — see [09 — Test prompts](09-test-prompts.md). This document is the *timing and narrative*; that one is the *material*. If you are demoing without a terminal, [testing from inside the Claude apps](09-test-prompts.md#testing-from-inside-the-claude-apps) covers what to type in the chat window and what the UI actually shows.
 
 ## Before you start
 

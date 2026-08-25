@@ -296,6 +296,26 @@ Invoke-RestMethod -Method Post -Uri "$cs/contentsafety/text:analyze?api-version=
 
 To fail closed instead, set `ignore-error="false"` on both `send-request` elements in `infra/policies/anthropic-api.xml` and redeploy. Content Safety being down will then take the API down with it.
 
+### A harmful prompt got through, but only when it was pasted inside a large block of text
+
+Content Safety accepts at most 10,000 characters. For a user turn longer than 9,000 the policy samples the **first 4,500 and the last 4,500** characters, so an attack at either end of a large paste is caught. A payload buried in the exact middle of a single turn over 9,000 characters is not inspected and will reach the model.
+
+Confirm that is what happened by measuring the turn:
+
+```powershell
+# if the turn is under 9,000 characters, sampling is not the explanation - see
+# "Harmful prompts are not blocked at all" above
+$prompt.Length
+```
+
+This is a documented limit, not a misconfiguration — see [08 — Guardrails](08-guardrails.md#design-decisions-and-limits) for the verified test matrix. Closing it requires chunked inspection of the whole turn, which multiplies Content Safety calls and latency in proportion to prompt size.
+
+### A guardrail blocks in the terminal but seems to do nothing in Claude Desktop
+
+Almost always the app is still on the `foundry` provider. The direct path has no guardrails at all — that is the entire finding in [08](08-guardrails.md). Check `inferenceProvider` in `.env`, re-run `./scripts/Set-ClaudeDesktopConfig.ps1`, and **fully quit the app from the tray icon** before reopening; configuration is read once at launch.
+
+If it is on `gateway` and still not blocking, check the size of the pasted turn (above), then reproduce in a terminal with `./scripts/Test-Guardrails.ps1 -PromptId jailbreak-dan` to get the status code and headers the app hides. [09 — Test prompts](09-test-prompts.md#a3--the-guardrail-demo-entirely-in-the-chat-window) has the in-app sequence.
+
 ### `429` from the gateway
 
 Expected behaviour: the per-caller `llm-token-limit` budget is spent. Check `x-gateway-tokens-remaining` and `Retry-After`. Raise `gatewayTokensPerMinute` and redeploy if the limit is too tight for real use. Note the counter key is the Entra `oid` when a token is present and the API Management subscription ID otherwise — switching auth mode mid-demo resets which bucket you are consuming.

@@ -284,6 +284,26 @@ right for a demo and wrong for a regulated workload. To fail closed, set
 conversation is not re-scanned on later turns. Scanning the whole history costs
 latency and hits the character limit fast.
 
+**Oversized turns are sampled head-and-tail, not scanned whole.** Content Safety
+caps input at 10,000 characters. For a user turn longer than 9,000 the policy
+sends the first 4,500 characters, an elision marker, and the last 4,500 — so an
+attack at either end of a large paste is still caught. Verified on the live
+deployment with the `jailbreak-dan` probe:
+
+| Case | Turn size | Result |
+| --- | --- | --- |
+| Jailbreak alone | 198 | Blocked |
+| Jailbreak first, then 9.9 KB of filler | 10,100 | Blocked |
+| 9.9 KB of filler, then the jailbreak | 10,100 | Blocked |
+| Jailbreak buried mid-way through filler | 9,800 | **Allowed — known gap** |
+
+A naive `Substring(0, 9000)` blocks only the first two. The head-and-tail sample
+closes the third, which is the realistic attack — paste a large document, then
+append the instruction. The fourth requires an attacker to place the payload in
+the exact untested middle of a single turn over 9,000 characters; closing it
+needs chunked inspection across the whole turn, at proportional cost and latency,
+and is deliberately not implemented here.
+
 **Ordering is deliberate.** Guardrails run *after* the rate limiter, so a caller
 cannot use rejected prompts to amplify Content Safety calls, and *before*
 `set-backend-service`, so a blocked prompt costs nothing.
@@ -299,4 +319,5 @@ protected-material detectors, which are output-side.
 - [01 — Architecture](01-architecture.md) — where guardrails sit in the request flow
 - [04 — Claude Code via the AI gateway](04-claude-code-gateway.md) — the rest of the policy
 - [06 — Demo script](06-demo-script.md) — Act 5d runs this live
+- [09 — Test prompts](09-test-prompts.md#a3--the-guardrail-demo-entirely-in-the-chat-window) — running the guardrail demo inside Claude Desktop, no terminal
 - [`docs/diagrams/architecture.drawio`](diagrams/architecture.drawio) — both paths and the enforcement points

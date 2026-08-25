@@ -117,7 +117,7 @@ On macOS or Linux use `source ./scripts/set-claude-code-env.sh direct entra` ins
 | [06 — Demo script](docs/06-demo-script.md) | A 25-minute run-of-show with talk track and expected output |
 | [07 — Troubleshooting](docs/07-troubleshooting.md) | Error-by-error diagnosis for both paths |
 | [08 — Guardrails](docs/08-guardrails.md) | **Why Azure's content filter does not apply to Claude**, and how the gateway enforces real ones |
-| [09 — Test prompts](docs/09-test-prompts.md) | **Copy-paste prompts for every scenario**, with expected results and talk track |
+| [09 — Test prompts](docs/09-test-prompts.md) | **Copy-paste prompts for every scenario**, with expected results and talk track — including [testing from inside the Claude apps](docs/09-test-prompts.md#testing-from-inside-the-claude-apps) |
 
 ## Repository layout
 

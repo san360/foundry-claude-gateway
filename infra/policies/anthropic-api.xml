@@ -294,7 +294,13 @@
                 // skipped rather than failing an otherwise valid request.
             }
             var text = sb.ToString().Trim();
-            return text.Length &gt; 9000 ? text.Substring(0, 9000) : text;
+            // Content Safety caps input at 10,000 characters. Truncating to the
+            // first 9,000 would let an attack hide behind a long paste: a user
+            // turn that opens with a pasted file and ends with the injection
+            // would never be inspected. Keep both ends instead, so an attack has
+            // to be buried in the middle of a >9,000 character turn to evade.
+            if (text.Length &lt;= 9000) { return text; }
+            return text.Substring(0, 4500) + "\n...\n" + text.Substring(text.Length - 4500);
         }" />
 
         <choose>
