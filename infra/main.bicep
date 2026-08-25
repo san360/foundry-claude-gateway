@@ -34,7 +34,7 @@ param tags object = {
   solution: 'claude-foundry-ai-gateway'
 }
 
-@description('Tag every resource with SecurityControl=Ignore. This is the tenant policy exemption tag that permits local (API key) authentication on Cognitive Services accounts. Without it, policy forces disableLocalAuth=true on the Foundry account and the key-based scenarios cannot be demonstrated. Never set this on a production workload.')
+@description('Tag every resource, and the resource group itself, with SecurityControl=Ignore. This is the tenant policy exemption tag that permits local (API key) authentication. Two resources need it: the Foundry account, where policy otherwise forces disableLocalAuth=true and the key-based scenarios cannot be demonstrated, and Azure Managed Redis, where API Management\'s external cache can only connect with an access key. Never set this on a production workload.')
 param allowLocalAuthExemption bool = true
 
 // -- Claude model selection ---------------------------------------------------
@@ -204,6 +204,39 @@ enforce it on the Anthropic surface. See docs/08-guardrails.md.
 ''')
 param deployStrictRaiPolicy bool = true
 
+@description('''
+Enable semantic caching on the gateway. Deploys an Azure Managed Redis cache
+with the RediSearch module, registers it as the API Management external cache,
+and turns on the llm-semantic-cache-lookup and llm-semantic-cache-store
+policies. This is the only feature in the stack that adds a standing hourly
+cost, so it can be switched off for a cheaper demo.
+''')
+param gatewaySemanticCache bool = true
+
+@description('''
+Similarity score threshold for a semantic cache hit, between 0 and 1. This is a
+distance, not a confidence: LOWER is stricter. 0.05 means a stored prompt must
+be very close in meaning before its response is reused. Raise it to serve more
+from cache, at the risk of answering a question the caller did not ask.
+''')
+param gatewaySemanticCacheScoreThreshold string = '0.05'
+
+@description('Seconds a cached completion stays valid.')
+param gatewaySemanticCacheDurationSeconds int = 120
+
+@description('Azure Managed Redis SKU backing the semantic cache.')
+param redisSkuName string = 'Balanced_B0'
+
+@description('''
+Region for the semantic cache. Defaults to the deployment region. Managed Redis
+capacity is allocated per region per SKU and a busy region returns
+AllocationFailed at create time, so this is a deliberate escape hatch: point the
+cache at a neighbouring region rather than moving the whole stack. The external
+cache is registered with useFromLocation "default", so cross-region works — it
+just adds a few milliseconds to a cache hit.
+''')
+param redisLocation string = ''
+
 // -----------------------------------------------------------------------------
 
 var uniqueSuffix = take(uniqueString(subscription().subscriptionId, resourceGroupName), 6)
@@ -212,6 +245,7 @@ var foundryProjectName = 'proj-${workloadName}'
 var apimServiceName = 'apim-${workloadName}-${environmentName}-${uniqueSuffix}'
 var workspaceName = 'log-${workloadName}-${environmentName}'
 var appInsightsName = 'appi-${workloadName}-${environmentName}'
+var redisCacheName = 'redis-${workloadName}-${environmentName}-${uniqueSuffix}'
 
 // The policy that forces disableLocalAuth=true evaluates the tag, so it has to
 // be present at create time. Adding it later does not retroactively re-enable
@@ -285,6 +319,34 @@ module foundry 'modules/foundry.bicep' = {
   }
 }
 
+// Step 2b: Redis for the gateway semantic cache. Independent of Foundry, so it
+// deploys in parallel with it; only the gateway API module needs both.
+module redis 'modules/redis.bicep' = if (deployGateway && gatewaySemanticCache) {
+  name: 'redis'
+  scope: rg
+  params: {
+    location: empty(redisLocation) ? location : redisLocation
+    tags: allTags
+    redisName: redisCacheName
+    skuName: redisSkuName
+  }
+}
+
+// Registers Redis as the gateway's external cache. Separate module because the
+// connection string is a secure output and must be referenced directly.
+module apimCache 'modules/apim-cache.bicep' = if (deployGateway && gatewaySemanticCache) {
+  name: 'apim-external-cache'
+  scope: rg
+  params: {
+    apimName: apimServiceName
+    redisName: redisCacheName
+  }
+  dependsOn: [
+    apim
+    redis
+  ]
+}
+
 // Step 3: publish the Anthropic Messages API on the gateway, pointing at the
 // Foundry account created above.
 module gatewayApi 'modules/apim-anthropic-api.bicep' = if (deployGateway) {
@@ -315,8 +377,18 @@ module gatewayApi 'modules/apim-anthropic-api.bicep' = if (deployGateway) {
     // gateway needs no separate resource - and its managed identity already
     // holds Cognitive Services User, which covers the data plane.
     contentSafetyEndpoint: foundry.outputs.contentSafetyEndpoint
+    // The native llm-content-safety policy validates the backend hostname and
+    // only accepts the cognitiveservices.azure.com form of the same account.
+    contentSafetyCognitiveEndpoint: foundry.outputs.contentSafetyCognitiveEndpoint
     guardrailSeverityThreshold: gatewayGuardrailSeverityThreshold
+    enableSemanticCache: gatewaySemanticCache
+    embeddingsBackendUrl: foundry.outputs.embeddingsBackendUrl
+    semanticCacheScoreThreshold: gatewaySemanticCacheScoreThreshold
+    semanticCacheDurationSeconds: gatewaySemanticCacheDurationSeconds
   }
+  dependsOn: [
+    apimCache
+  ]
 }
 
 // -- Outputs ------------------------------------------------------------------
@@ -377,3 +449,15 @@ output gatewayGuardrailsEnabled bool = deployGateway ? gatewayApi!.outputs.guard
 
 @description('Harm severity (0-7) at or above which the gateway blocks a prompt.')
 output gatewayGuardrailSeverityThreshold int = deployGateway ? gatewayApi!.outputs.guardrailSeverityThreshold : 0
+
+@description('Whether the gateway semantic cache is deployed and wired into the policy.')
+output gatewaySemanticCacheEnabled bool = deployGateway && gatewaySemanticCache
+
+@description('Embeddings deployment vectorising prompts for the semantic cache.')
+output embeddingDeploymentName string = foundry.outputs.embeddingDeploymentName
+
+@description('Azure Managed Redis cache backing the semantic cache.')
+output redisCacheName string = (deployGateway && gatewaySemanticCache) ? redis!.outputs.redisName : ''
+
+@description('Per-caller token ceiling enforced by llm-token-limit, per minute.')
+output gatewayTokensPerMinute int = deployGateway ? gatewayTokensPerMinute : 0

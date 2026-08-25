@@ -206,6 +206,17 @@ resource strictRaiPolicy 'Microsoft.CognitiveServices/accounts/raiPolicies@2024-
 
 var effectiveRaiPolicyName = deployStrictRaiPolicy ? strictRaiPolicyName : 'Microsoft.DefaultV2'
 
+@description('OpenAI-format embedding model deployed for the gateway semantic cache. Empty disables it.')
+param embeddingModel string = 'text-embedding-3-small'
+
+@description('Version of the embedding model.')
+param embeddingModelVersion string = '1'
+
+@description('Thousands of tokens per minute allocated to the embedding deployment.')
+param embeddingCapacity int = 30
+
+var embeddingDeploymentName = empty(embeddingModel) ? '' : embeddingModel
+
 resource haikuDeployment 'Microsoft.CognitiveServices/accounts/deployments@2025-10-01-preview' = if (!empty(haikuModel)) {
   parent: account
   name: haikuDeploymentName
@@ -295,6 +306,36 @@ resource opusDeployment 'Microsoft.CognitiveServices/accounts/deployments@2025-1
   ]
 }
 
+// Embeddings power the gateway's semantic cache. llm-semantic-cache-lookup
+// vectorises each incoming prompt and compares it against stored vectors, so it
+// needs an embeddings deployment reachable over the OpenAI inference surface.
+// Anthropic-format deployments cannot serve this - Claude exposes no embeddings
+// endpoint - which is why an OpenAI-format model is deployed alongside them on
+// the same AIServices account.
+resource embeddingDeployment 'Microsoft.CognitiveServices/accounts/deployments@2025-10-01-preview' = if (!empty(embeddingModel)) {
+  parent: account
+  name: embeddingDeploymentName
+  sku: {
+    name: 'Standard'
+    capacity: embeddingCapacity
+  }
+  properties: {
+    model: {
+      format: 'OpenAI'
+      name: embeddingModel
+      version: embeddingModelVersion
+    }
+  }
+  // Serialised behind the Claude deployments: concurrent writes to an account's
+  // deployments collection race and fail with a conflict.
+  dependsOn: [
+    project
+    opusDeployment
+    sonnetDeployment
+    haikuDeployment
+  ]
+}
+
 @description('Foundry account name, used as ANTHROPIC_FOUNDRY_RESOURCE.')
 output accountName string = account.name
 
@@ -315,6 +356,22 @@ Cognitive Services User role, whose Microsoft.CognitiveServices/* data action
 already covers it.
 ''')
 output contentSafetyEndpoint string = 'https://${account.name}.services.ai.azure.com'
+
+@description('''
+Azure AI Content Safety base URL in the form the native llm-content-safety
+policy requires. That policy validates the backend hostname and only accepts
+https://<name>.cognitiveservices.azure.com - the services.ai.azure.com alias
+above is rejected even though both resolve to the same account.
+''')
+output contentSafetyCognitiveEndpoint string = 'https://${account.name}.cognitiveservices.azure.com'
+
+@description('Embeddings deployment backing the gateway semantic cache. Empty when no embedding model is deployed.')
+output embeddingDeploymentName string = embeddingDeploymentName
+
+@description('Runtime URL of the embeddings deployment, shaped for an API Management backend used by llm-semantic-cache-lookup. Query parameters are excluded, as the policy appends its own.')
+output embeddingsBackendUrl string = empty(embeddingModel)
+  ? ''
+  : 'https://${account.name}.openai.azure.com/openai/deployments/${embeddingDeploymentName}/embeddings'
 
 @description('RAI content filter policy attached to the Claude deployments. Attached and reported by ARM, but not enforced on the Anthropic surface - see docs/08-guardrails.md.')
 output raiPolicyName string = effectiveRaiPolicyName

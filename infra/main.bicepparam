@@ -106,6 +106,20 @@ param gatewayGuardrails = true
 // default content filter.
 param gatewayGuardrailSeverityThreshold = 4
 
+// Semantic cache. Answers a repeated - or merely reworded - prompt from Redis
+// instead of the model, for zero model tokens. This is the only part of the
+// stack that needs its own resource, and Azure Managed Redis bills hourly, so
+// set it to false for a long-lived idle demo environment.
+param gatewaySemanticCache = true
+
+// Azure Managed Redis capacity is allocated per region PER SKU, and a busy
+// region rejects the create with AllocationFailed after several minutes. We hit
+// exactly that on eastus2 at both Balanced_B0 and Balanced_B1, while eastus took
+// the same SKU immediately - so the cache lives next door. The APIM external
+// cache is registered with useFromLocation 'default', so cross-region is
+// supported; it costs a few milliseconds on a hit. Leave as '' to co-locate.
+param redisLocation = 'eastus'
+
 // Attach a strict custom RAI policy to the Claude deployments. Deployed as
 // reproducible evidence rather than as a working control: ARM accepts and
 // reports the binding, but nothing enforces it on the Anthropic surface.

@@ -23,12 +23,14 @@ flowchart LR
 
     subgraph Azure["Azure subscription"]
         subgraph APIM["Azure API Management (v2 tier)"]
-            POL["AI gateway policy<br/>validate-azure-ad-token<br/>llm-token-limit<br/>llm-emit-token-metric<br/>content-safety guardrails<br/>authentication-managed-identity"]
+            POL["AI gateway policy — all native<br/>validate-azure-ad-token<br/>llm-token-limit<br/>llm-emit-token-metric<br/>llm-content-safety<br/>llm-semantic-cache-lookup/store<br/>authentication-managed-identity"]
         end
         subgraph FDY["Microsoft Foundry (AIServices)"]
             DEP["Claude deployments<br/>haiku / sonnet / opus"]
-            CS["Azure AI Content Safety<br/>shieldPrompt + analyze"]
+            EMB["text-embedding-3-small"]
+            CS["Azure AI Content Safety<br/>shield-prompt + categories"]
         end
+        RDS["Azure Managed Redis<br/>+ RediSearch"]
         AI["Application Insights<br/>+ Log Analytics"]
     end
 
@@ -39,6 +41,8 @@ flowchart LR
     CC -- "2 gateway<br/>/anthropic/v1/messages" --> APIM
     SDK -- "2 gateway" --> APIM
     POL -- "screen prompt<br/>403 if blocked" --> CS
+    POL -- "embed + cache lookup" --> RDS
+    POL -- "embeddings" --> EMB
     APIM -- "managed identity token<br/>or passthrough" --> FDY
     ENTRA -. "bearer token" .-> CC
     ENTRA -. "validate" .-> POL
@@ -193,11 +197,18 @@ on 2026-08-21 (`eastus2`, API Management `BasicV2`, Foundry with `claude-haiku-4
 | Model discovery `GET /v1/models` via gateway (key and Entra) | `200`, both deployments, `x-gateway-synthesised: models-list` |
 | Model discovery `GET /v1/models` with no credential | `401` |
 | Model discovery `GET /v1/models` direct to Foundry | `404 api_not_supported` � gateway-only capability |
-| Guardrails � 6 harmful prompts via gateway | `403` on all six, `x-guardrail-blocked` names the detector |
+| Guardrails � 6 harmful prompts via gateway | `403` on all six, blocked by the native `llm-content-safety` policy |
 | Guardrails � same 6 prompts direct to Foundry | `200` on all six; **none stopped**, one jailbreak answered outright |
 | Guardrails � 3 benign control prompts, both paths | `200`, no false positives |
 | Custom RAI policy `claude-strict` (every category blocking at `Low`) | attached and confirmed by ARM, but **not enforced** on the Anthropic surface |
 | Allowed gateway traffic carries proof the check ran | `x-guardrail: checked:allow` |
+| Guardrail bypass via `system` as an array of blocks (the Claude app shape) | closed by the normalisation shim; unguarded the native policy skips inspection |
+| Benign prompt over 10,000 characters through the gateway | `200` — the native policy alone would return `403` on size |
+| Guardrail bypass via severity dilution (`system: "You are helpful."` + harmful turn) | closed by probing system and user text separately; unguarded it returns `200` |
+| `llm-emit-token-metric` / `llm-token-limit` headers | `x-gateway-tokens-consumed` and `x-gateway-tokens-remaining` track real usage against a 20,000/min ceiling |
+| `llm-semantic-cache-lookup` / `-store` on Azure Managed Redis | identical **and reworded** prompts replay the byte-identical stored completion in ~0.6 s for zero tokens; unrelated prompts miss |
+| Guardrail `403` versus a real auth failure | `403` + `x-guardrail-blocked: content-safety` vs `401 authentication_error` — never ambiguous |
+| `scripts/Test-NativePolicies.ps1` end to end | **16 of 16 pass** (8 content safety, 4 token, 4 cache) |
 | Guardrail latency cost | ~93 ms (direct 725 ms, gateway 818 ms) |
 
 Five findings from that exercise are worth reading before you present this:

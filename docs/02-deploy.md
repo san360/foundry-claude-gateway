@@ -89,6 +89,28 @@ Full parameter reference:
 | `gatewayTokensPerMinute` | `20000` | Per-caller TPM budget before 429 |
 | `gatewaySubscriptionKeyHeader` | `x-api-key` | Header carrying the APIM subscription key. `x-api-key` is Anthropic's own convention, is what the Foundry Anthropic endpoint expects, and is one of only two schemes Claude Desktop can send — so one header name works everywhere. |
 | `gatewayBodyLogBytes` | `8192` | Bytes of request/response body logged to Application Insights. `0` disables it. |
+| `gatewayModelDiscovery` | `true` | Answer `GET /v1/models` from ARM, which Foundry's Anthropic surface cannot do |
+| `gatewayGuardrails` | `true` | Master switch for `llm-content-safety` |
+| `gatewayGuardrailSeverityThreshold` | `4` | Block at or above this severity, on Content Safety's 0–7 scale |
+| `gatewaySemanticCache` | `true` | Deploys Azure Managed Redis and enables `llm-semantic-cache-*`. Set `false` to remove the only standing hourly cost besides API Management. |
+| `gatewaySemanticCacheScoreThreshold` | `'0.05'` | Vector **distance**, so lower is stricter. Raise it to serve more from cache, at the risk of answering a question the caller did not ask. |
+| `gatewaySemanticCacheDurationSeconds` | `120` | How long a cached completion stays valid |
+| `redisSkuName` | `Balanced_B0` | Managed Redis size backing the cache |
+| `redisLocation` | `''` (same as `location`) | **Escape hatch for capacity.** See below. |
+| `embeddingModel` | `text-embedding-3-small` | Deployed on the same Foundry account; vectorises prompts for the cache |
+
+> **`AllocationFailed` on Azure Managed Redis.** Managed Redis capacity is
+> allocated per region *per SKU*, and a busy region refuses the create — we hit
+> this on `eastus2`, at both `Balanced_B0` and `Balanced_B1`, while `eastus` and
+> `westus2` provisioned the same SKU without complaint. It is not a quota you can
+> raise from the portal. Set `redisLocation` to a neighbouring region rather than
+> moving the whole stack; the external cache is registered with
+> `useFromLocation: 'default'`, so cross-region works and costs a few
+> milliseconds on a cache hit. Alternatively set `gatewaySemanticCache = false`.
+>
+> Budget **20–40 minutes** for the Redis create either way. It is the slowest
+> resource in the deployment after API Management, and it fails *slowly* too — an
+> allocation failure took about six minutes to surface.
 
 ## Deploy
 

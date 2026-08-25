@@ -142,17 +142,26 @@ Lower `gatewayTokensPerMinute` to something small (say 2000) and redeploy if you
 
 ### Token metrics
 
-`llm-emit-token-metric` publishes to the `foundry-ai-gateway` namespace with `CallerId`, `ApiId` and `OperationId` dimensions. In Application Insights:
+`llm-emit-token-metric` publishes `Prompt Tokens`, `Completion Tokens` and `Total Tokens` to the `foundry-ai-gateway` namespace. Two caveats that cost time if you meet them cold:
 
-```kusto
-customMetrics
-| where name in ("Prompt Tokens", "Completion Tokens", "Total Tokens")
-| extend caller = tostring(customDimensions["CallerId"])
-| summarize tokens = sum(value) by name, caller, bin(timestamp, 5m)
-| render timechart
+- These are **Azure Monitor custom metrics**, not Log Analytics rows. A `customMetrics` KQL query returns nothing even when the policy is working correctly. Read them through the metrics API — the exact call is in [07 — Troubleshooting → Token spend](07-troubleshooting.md#token-spend).
+- Emission is opt-in per diagnostic entity via **`metrics: true`**, which the portal does not surface. `apim-anthropic-api.bicep` sets it. Without it the policy runs silently and emits nothing.
+
+The `CallerId` dimension — the actual chargeback story — additionally needs *Custom metrics (Preview) → With dimensions* enabled on the Application Insights component, which is portal-only. See [Token metrics are empty](07-troubleshooting.md#token-metrics-are-empty).
+
+For a demo, the response headers below are a faster and more reliable way to show the same thing.
+
+### Semantic cache partitioning
+
+Cached answers are partitioned by caller, so one caller can never be served another caller's completion. A second, optional partition key is the `x-gateway-cache-scope` request header:
+
+```http
+x-gateway-cache-scope: project-alpha
 ```
 
-That query is the chargeback story in one screen.
+Send it to isolate a project, session or tenant inside a single caller. Send a fresh GUID to guarantee a cold partition — that is the only reliable way to force a model call, because a random nonce *inside the prompt* does not work: the lookup is semantic, so the embedding ignores it and the request still hits.
+
+Worth knowing before you measure anything: **a cache hit reports `x-gateway-tokens-consumed: 0`**, because the backend is never called. That is the feature working, not a broken counter.
 
 ### Request tracing
 
@@ -175,29 +184,34 @@ Turn body logging down before anything resembling production — prompts routine
 
 The most important governance feature here, because it covers a gap you cannot close any other way: **Azure's RAI content filter does not run for Claude in Foundry**. You can attach a `raiPolicyName` to the deployment, ARM will confirm it, and nothing will enforce it. On the direct path the only safety layer is Claude's own alignment, which returns refusals as `HTTP 200` — invisible to metrics and alerts.
 
-The gateway closes that gap. Inbound, before the backend is selected, the policy sends the caller's most recent user turn to **Azure AI Content Safety**:
+The gateway closes that gap with the **native `llm-content-safety` policy**, inbound, before the backend is selected. One declarative policy element runs both Content Safety checks:
 
-| Call | Catches |
+| Check | Catches |
 | --- | --- |
-| `POST /contentsafety/text:shieldPrompt` | jailbreaks and prompt-injection attempts |
-| `POST /contentsafety/text:analyze` | Hate, Sexual, Violence, SelfHarm scored 0–7 |
+| `shield-prompt` | jailbreaks and prompt-injection attempts |
+| `categories` | Hate, Sexual, Violence, SelfHarm scored 0–7 |
 
 Both are needed. Jailbreak prompts score **0** on every harm category, and harm prompts are **not** flagged as attacks — either check alone misses half of the probe corpus.
 
 Content Safety is served by the **same AIServices account** on the same hostname as the Claude deployments, and `Cognitive Services User` — which the gateway identity already holds — covers its data plane. No extra resource, no extra role assignment.
 
+The policy is preceded by a short **normalisation step** that flattens the request into a canonical, bounded probe body. That step is not cosmetic: applied to a raw Anthropic body, the native policy **skips inspection entirely when `system` is an array of content blocks** — the shape Claude Desktop and Claude Code send — and **returns 403 on any body over 10,000 characters**, which is most real Claude Code traffic. Both behaviours are reproduced and explained in [08 — Guardrails](08-guardrails.md#how-we-use-apims-built-in-llm-content-safety-policy).
+
 A blocked request never reaches the model, so it costs zero model tokens:
 
 ```http
 HTTP/1.1 403 Forbidden
-x-guardrail-blocked: violence:5
-x-guardrail-enforced-by: azure-ai-content-safety
+
+{ "statusCode": 403, "message": "Request failed content safety check." }
 ```
+
+The native policy does not name the category that fired; that detail is in the APIM diagnostic logs.
 
 An allowed request carries proof the check ran rather than being skipped:
 
 ```http
 x-guardrail: checked:allow
+x-guardrail-enforced-by: apim-llm-content-safety
 ```
 
 Measured cost is about **93 ms** per request. Demonstrate it with:
@@ -507,13 +521,25 @@ The nine-prompt corpus in `scripts/guardrail-prompts.json`, run against the live
 | Prompt group | Direct to Foundry | Via the gateway |
 | --- | --- | --- |
 | 3 benign controls | **200** answered | **200** answered — no false positives |
-| 2 jailbreaks | **200** — one *answered outright*, one refused by the model | **403** `prompt_shield` on both |
-| 4 harm categories | **200** on all four, model refusals only | **403** on all four: `violence:5`, `hate:7`, `selfharm:5`, `sexual:6` |
+| 2 jailbreaks | **200** — one *answered outright*, one refused by the model | **403** on both |
+| 4 harm categories | **200** on all four, model refusals only | **403** on all four |
 
 **Direct stopped 0 of 6. The gateway stopped 6 of 6 and allowed 3 of 3 benign prompts.**
 
 Separately confirmed, and the reason this section exists: a custom RAI policy named `claude-strict` — every harm category set to `blocking` at `severityThreshold: Low` on both prompt and completion, plus Jailbreak and Protected Material Text — was deployed and attached to `claude-haiku-4-5`. ARM reports `raiPolicyName: claude-strict`. A prompt that policy forbids still returned **200**. The platform filter is configured, reported, and inert.
 
-Latency, three runs each: direct 725 ms average, gateway 818 ms average — roughly **93 ms** for two Content Safety calls. Allowed responses carried `x-guardrail: checked:allow`.
+Latency, measured over 8 samples at `max_tokens=16` (medians): direct **757 ms**, gateway with one Content Safety probe **759 ms**, gateway with two probes (a system prompt is present) **593 ms**, and a blocked request **454 ms** because the model is never called. The guardrail cost is **within run-to-run noise** — the two-probe row is faster only because that particular system prompt asks for a one-sentence answer, so it is not a like-for-like comparison. Allowed responses carried `x-guardrail: checked:allow`.
 
 Confirmed on **app-shaped payloads** as well, not just curl bodies: a request with `system` as an array of blocks, two tool definitions and a three-turn history is blocked identically, and `stream: true` and `stream: false` give the same result on all nine corpus prompts. That matters because Claude Desktop and Claude Code always stream — so the guardrail demo works entirely inside the app. See [09 — Test prompts](09-test-prompts.md#a3--the-guardrail-demo-entirely-in-the-chat-window) for the in-chat sequence.
+
+### Native AI policies — 16 of 16 verified
+
+`./scripts/Test-NativePolicies.ps1` exercises all three stock `llm-*` policy families against the live deployment:
+
+| Section | Result |
+| --- | --- |
+| `llm-content-safety` | **8 of 8** — including `system`-as-array, the severity-dilution bypass, a 14,475-character benign paste, and harmful text with tool definitions present |
+| `llm-emit-token-metric` / `llm-token-limit` | **4 of 4** — `x-gateway-tokens-consumed` and `-remaining` track real usage against the 20,000/min ceiling |
+| `llm-semantic-cache-lookup` / `-store` | **4 of 4** — identical *and reworded* prompts replay the byte-identical stored completion in ~0.6 s; an unrelated prompt misses |
+
+Token metrics were separately confirmed in the Azure Monitor metrics store after enabling `metrics: true` on the API diagnostic — `Prompt Tokens`, `Completion Tokens` and `Total Tokens` all report non-zero totals under the `foundry-ai-gateway` namespace.

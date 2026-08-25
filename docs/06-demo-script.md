@@ -252,7 +252,20 @@ Now the same two prompts through the gateway:
 ./scripts/Test-Guardrails.ps1 -PromptId harm-violence -Mode Gateway -ShowResponse
 ```
 
-> "403, before the model was ever called — so it cost zero tokens. And the header tells you exactly why: `x-guardrail-blocked: prompt_shield` for the jailbreak, `violence:5` for the other. That's Azure AI Content Safety, running in the API Management policy. Two checks: Prompt Shields for jailbreaks, and severity scoring across four harm categories. You need both — the jailbreak scores zero on every harm category, and the harmful prompt isn't flagged as an attack."
+> "403, before the model was ever called — so it cost zero tokens. That's Azure AI Content Safety, running as a stock API Management policy. Two checks in one policy element: Prompt Shields for jailbreaks, and severity scoring across four harm categories. You need both — the jailbreak scores zero on every harm category, and the harmful prompt isn't flagged as an attack."
+
+If someone asks *which* rule fired: the native policy deliberately returns a
+generic verdict and does not say. The category is in the APIM diagnostic logs.
+Say so plainly — then show `Test-NativePolicies.ps1`, which proves the three
+cases that actually matter: the `system`-as-array bypass, the one-sentence system
+prompt that dilutes the severity score, and a benign 14 KB paste that the native
+policy would otherwise reject on size alone.
+
+```powershell
+./scripts/Test-NativePolicies.ps1 -Only ContentSafety -ShowDetail
+```
+
+Expected: **8 of 8 pass.**
 
 Finish with the whole corpus, which is the slide-worthy moment:
 

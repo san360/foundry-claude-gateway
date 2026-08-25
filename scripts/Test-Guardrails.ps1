@@ -8,9 +8,9 @@
     direct Foundry endpoint, the AI gateway, or both, and classifies every
     outcome by WHO stopped it:
 
-      BLOCKED-GATEWAY   HTTP 403 with an x-guardrail-blocked header. Azure AI
-                        Content Safety, called by the APIM policy, rejected the
-                        prompt before the model was invoked. Enforced by you,
+      BLOCKED-GATEWAY   HTTP 403 from the gateway. Azure AI Content Safety,
+                        called by the native llm-content-safety policy, rejected
+                        the prompt before the model was invoked. Enforced by you,
                         logged, and costs no model tokens.
 
       BLOCKED-PLATFORM  HTTP 400 with a content_filter error. Azure's built-in
@@ -225,6 +225,12 @@ function Invoke-Probe {
         if ($status -eq 403 -and $blockedBy) {
             $result.outcome = 'BLOCKED-GATEWAY'
             $result.signal = $blockedBy
+        }
+        elseif ($status -eq 403 -and $raw -match 'content safety') {
+            # The native llm-content-safety policy returns its own generic 403
+            # body and no custom header, so the message is the only signal.
+            $result.outcome = 'BLOCKED-GATEWAY'
+            $result.signal = 'llm-content-safety'
         }
         elseif ($status -eq 400 -and $raw -match 'content_filter') {
             $result.outcome = 'BLOCKED-PLATFORM'

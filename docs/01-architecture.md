@@ -41,16 +41,22 @@ Claude Code / SDK
       3. GET /v1/models only: synthesise the model list from ARM and return it
       4. enforce llm-token-limit (per-caller TPM budget → 429)
       5. emit llm-emit-token-metric to Application Insights
-      6. screen the prompt with Azure AI Content Safety (jailbreak + harm severity) → 403
-      7. select the Foundry backend
-      8. attach a backend credential (managed identity, or pass the caller's token through)
+      6. screen the system prompt and the last user turn as two
+         separate llm-content-safety probes → 403
+      7. llm-semantic-cache-lookup: answer from Redis on a close-enough prompt
+      8. select the Foundry backend
+      9. attach a backend credential (managed identity, or pass the caller's token through)
   → Foundry → Claude deployment
-  → outbound: stamp x-gateway and x-guardrail so the hop and the check are provable
+  → outbound: llm-semantic-cache-store, then stamp x-gateway and x-guardrail
+  → on-error: reshape a content-safety 403 into an Anthropic-style error body
 ```
 
-The gateway is the control plane. The demo value is that everything in steps 1–8 is configurable at runtime through named values, so you can show three different security postures in a single session without redeploying.
+Every governing step is a **stock `llm-*` policy**. The gateway is the control
+plane, and everything in steps 1–9 is configurable at runtime through named
+values, so you can show three different security postures in a single session
+without redeploying.
 
-Steps 3 and 6 are the two capabilities the gateway *adds* rather than governs. Foundry's Anthropic surface answers `GET /v1/models` with `404 api_not_supported`, so Claude Desktop's **Model discovery** toggle cannot work on the direct path. The gateway answers the call itself — listing the account's Anthropic-format deployments over ARM with its own managed identity — so the client's model picker populates itself. Details in [04-claude-code-gateway.md → Model discovery](04-claude-code-gateway.md#model-discovery). Step 6 is covered below.
+Steps 3, 6 and 7 are the capabilities the gateway *adds* rather than governs. Foundry's Anthropic surface answers `GET /v1/models` with `404 api_not_supported`, so Claude Desktop's **Model discovery** toggle cannot work on the direct path. The gateway answers the call itself — listing the account's Anthropic-format deployments over ARM with its own managed identity — so the client's model picker populates itself. Details in [04-claude-code-gateway.md → Model discovery](04-claude-code-gateway.md#model-discovery). Step 6 is covered below; step 7 is the semantic cache, which turns a repeated or reworded question into a Redis lookup instead of a model call.
 
 ## Why these specific choices
 
@@ -97,12 +103,14 @@ The role assignment therefore exists **before** the API is published, so the fir
 | inbound | `send-request` + `return-response` on `models-list` | Model discovery the backend cannot serve — authenticated, cached, and filtered to Anthropic-format deployments |
 | inbound | `llm-token-limit` | Per-caller tokens-per-minute budget with `Retry-After`, understands the Anthropic schema |
 | inbound | `llm-emit-token-metric` | Prompt/completion/total tokens dimensioned by caller into Application Insights |
-| inbound | `send-request` × 2 to Azure AI Content Safety | **Guardrails the platform filter cannot provide for Claude** — jailbreak detection and harm severity scoring, before the model is called. See [08 — Guardrails](08-guardrails.md) |
+| inbound | `set-body` normalisation + two `llm-content-safety` probes | **Guardrails the platform filter cannot provide for Claude** — jailbreak detection and harm severity scoring, before the model is called. Native policy; the normalisation step exists because the policy skips inspection when `system` is an array and 403s above 10,000 characters, and the system prompt is probed **separately** from the user turn because Content Safety scores a submission as a whole, so benign text dilutes the score. See [08 — Guardrails](08-guardrails.md) |
+| inbound | `llm-semantic-cache-lookup` | A reworded question served from Redis for zero model tokens. After the guardrail, so a blocked prompt can never be answered from cache |
 | inbound | `set-backend-service` | Backend abstraction — the seam where you would add load balancing or failover pools |
 | inbound | `choose` on `{{backend-auth-mode}}` | Credential swap vs. passthrough |
 | inbound | `authentication-managed-identity` | Zero stored secrets between gateway and model |
 | inbound | header hygiene | The gateway credential never reaches the model backend |
 | backend | `forward-request buffer-response="false"` | SSE streaming survives the hop |
+| outbound | `llm-semantic-cache-store` | Populates the cache on the way out |
 | outbound | `set-header x-gateway` | Visible proof the request traversed the gateway |
 | outbound | `set-header x-guardrail` | Proof the guardrail check ran and allowed the prompt, rather than being skipped |
 | on-error | `set-header x-gateway-error` | Fast diagnosis during a live demo |
@@ -132,16 +140,36 @@ Worth stating plainly in an architecture doc, because it drives the design: **Az
 
 | Layer | Enforces | Auditable |
 | --- | --- | --- |
-| Gateway — Azure AI Content Safety in the inbound policy | Yes — `403` before the model is called | Yes: `x-guardrail-blocked` header plus Application Insights |
+| Gateway — native `llm-content-safety` in the inbound policy | Yes — `403` before the model is called | Yes: APIM diagnostic logs plus Application Insights |
 | Platform — RAI policy on the deployment | No, for Claude | n/a |
 | Model — Anthropic's own alignment | Partly | No — a refusal is `HTTP 200`, shaped like any other answer |
 
 Content Safety is served by the **same AIServices account** that hosts the Claude deployments, on the same hostname, and `Cognitive Services User` already covers its data plane — so guardrails add no resource and no role assignment. Full evidence and tuning guidance: [08 — Guardrails](08-guardrails.md).
 
+## Semantic cache
+
+`llm-semantic-cache-lookup` and `llm-semantic-cache-store` are the one part of this stack that needs infrastructure of its own:
+
+| Piece | Why |
+| --- | --- |
+| **Azure Managed Redis** with the RediSearch module | Vector index for prompt embeddings. RediSearch can only be enabled **at cache creation** — it is a one-way door, so a mistake means delete and recreate. |
+| Registered as an APIM **external cache** | The policies read and write through APIM's cache abstraction, not a direct Redis client. External cache requires **access-key auth**; Entra to Managed Redis is not supported. |
+| A **`text-embedding-3-small`** deployment on the same Foundry account | Turns each prompt into the vector that gets compared. Reached over the gateway's managed identity, like every other backend. |
+
+`clusteringPolicy` is set to `EnterpriseCluster` rather than the Managed Redis default of `OSSCluster`, because OSS clustering needs a cluster-aware client and APIM's cache client is not one. `accessKeysAuthentication` must be explicitly `Enabled`: from API version `2025-04-01` it defaults to `Disabled`, and registering the external cache then fails with *"The ListKeys operation is not supported when access keys are disabled."* This is also why the `SecurityControl=Ignore` tag matters — without it a tenant policy re-disables the keys.
+
+**A cache hit consumes no token budget.** The lookup happens before backend routing, so `llm-token-limit` never sees a call and `x-gateway-tokens-consumed` reads `0`. That is the intended behaviour, not a metric bug — but it will surprise you when writing tests, because a repeated prompt reports zero consumption. Use a per-run nonce in any test that needs to measure tokens.
+
+Set `gatewaySemanticCache = false` to skip all of it. That is worth knowing: Redis is the **only standing hourly cost** in the stack besides API Management. If Managed Redis capacity is unavailable in your region — an `AllocationFailed` at create time — set `redisLocation` to a neighbouring region instead of moving the whole deployment. Capacity is per region *per SKU* and is not a quota you can raise in the portal.
+
 ## Observability
 
 - **Application Insights** receives APIM request telemetry (`apim.bicep` logger + `apim-anthropic-api.bicep` API diagnostics) with 100% sampling and the first 8 KB of request/response bodies, which is what makes the "inspect the prompt" moment possible in a demo.
-- **`llm-emit-token-metric`** publishes `Prompt Tokens`, `Completion Tokens` and `Total Tokens` in the `foundry-ai-gateway` namespace, dimensioned by `CallerId`, `ApiId` and `OperationId` — this is the chargeback story.
+- **`llm-emit-token-metric`** publishes `Prompt Tokens`, `Completion Tokens` and `Total Tokens` in the `foundry-ai-gateway` namespace — this is the chargeback story. Three things about this are easy to get wrong:
+  - The API diagnostic entity must carry **`metrics: true`**. Without it the policy runs, returns no error, and emits nothing at all. The portal does not expose the toggle; `apim-anthropic-api.bicep` sets it.
+  - The counts go to the **Azure Monitor metrics store**, not to the `AppMetrics` Log Analytics table. Query them with the metrics API, not with KQL.
+  - The `CallerId`, `ApiId` and `OperationId` **dimensions are dropped** until *Custom metrics (Preview) → With dimensions* is enabled on the Application Insights component. That is a portal-only setting (Application Insights → **Usage and estimated costs**); it is not expressible in Bicep and the legacy `currentbillingfeatures` API ignores it. Until you flip it, the totals are correct but you cannot split them per caller.
+- **The response headers are the demo-friendly version of the same data.** `x-gateway-tokens-consumed` and `x-gateway-tokens-remaining` come from `llm-token-limit` and need no portal at all. A semantic-cache hit reports `0` consumed, because the backend was never called.
 - **Foundry diagnostics** are separately available on the Cognitive Services account for the direct path.
 
 The contrast is the point: on the direct path you can see *that* a model was called; through the gateway you can see *who* called it, *how much* it cost them, and you can stop them.
@@ -152,6 +180,8 @@ The contrast is the point: on the direct path you can see *that* a model was cal
 | --- | --- |
 | Claude deployments | Claude Consumption Units, billed through Azure Marketplace, per token |
 | API Management BasicV2 | Fixed hourly rate per scale unit — the dominant idle cost |
+| Azure Managed Redis `Balanced_B0` | Fixed hourly rate. Only present when `gatewaySemanticCache = true` |
+| `text-embedding-3-small` | Per token, and tiny — one embedding per cache lookup |
 | Log Analytics / App Insights | Ingestion volume; body logging at 8 KB adds up under load |
 
-For a short-lived demo, set `deployGateway = false` to skip API Management entirely if you only need the direct path, and delete the resource group afterwards.
+For a short-lived demo, set `deployGateway = false` to skip API Management entirely if you only need the direct path, `gatewaySemanticCache = false` to skip Redis, and delete the resource group afterwards.

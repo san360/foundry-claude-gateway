@@ -4,7 +4,7 @@
 
 1. Does the **raw HTTP** call work? `./scripts/Test-ClaudeEndpoint.ps1`. If it fails, the problem is Azure, not Claude Code.
 2. Is it **direct or gateway**? Test direct first; if direct fails, gateway cannot work.
-3. Is it **auth or routing**? `401`/`403` is auth; `404`/`405` is routing or a wrong model name. A `403` carrying `x-guardrail-blocked` is neither — it is a content guardrail, see [Gateway path](#403-forbidden-with-x-guardrail-blocked).
+3. Is it **auth or routing**? `401` is auth; `404`/`405` is routing or a wrong model name. A `403` is almost always the content guardrail, **not** credentials — see [403 that a Claude client reports as "Failed to authenticate"](#403-that-a-claude-client-reports-as-failed-to-authenticate).
 4. Only then look at Claude Code environment variables.
 
 ## Deployment
@@ -240,9 +240,9 @@ Look at the `x-gateway-error` response header first.
 
 - `backend-auth-mode = passthrough`: the caller's token is being forwarded, so **the caller** needs `Cognitive Services User` — and the caller must actually be sending a token. Subscription-key-only callers cannot work in passthrough mode. Either grant the user the role or switch back to `managedIdentity`.
 
-### `403 Forbidden` with `x-guardrail-blocked`
+### `403 Forbidden` with `{"statusCode":403,"message":"Request failed content safety check."}`
 
-Working as designed: Azure AI Content Safety stopped the prompt at the gateway before it reached the model. The header names the verdict — `prompt_shield` for a jailbreak, or `<category>:<severity>` such as `violence:5`.
+Working as designed: the native `llm-content-safety` policy stopped the prompt at the gateway before it reached the model. The policy does not report which category fired — look in the APIM diagnostic logs, or score the prompt directly against Content Safety (see [09 — Test prompts](09-test-prompts.md#s8--guardrails)).
 
 If it is a **false positive** (security research, medical or legal work, threat modelling), raise the threshold:
 
@@ -280,9 +280,32 @@ If `x-guardrail` is absent on an allowed response, the deployed policy is stale 
 
 If the header is present but harmful prompts still get through, the threshold is too high, or Content Safety is failing and the policy is **failing open** — see below.
 
+### 403 that a Claude client reports as "Failed to authenticate"
+
+This is the confusing one, and it is **not** an authentication problem.
+
+Claude Desktop and Claude Code map *any* HTTP 403 onto their authentication path
+and render it as `Failed to authenticate. API Error: 403 ...`. The gateway
+returns 403 when Content Safety blocks a prompt, so a blocked jailbreak looks
+like a credential failure to the user.
+
+Read the body and the headers, not the client's prefix:
+
+| Signal | Meaning |
+| --- | --- |
+| `403` + `x-guardrail-blocked: content-safety` | **Content Safety blocked the prompt.** Credentials are fine. |
+| `403` + `x-gateway-error: ContentSafetyPolicyViolated` | Same thing, named by the policy. |
+| `401` + `"type":"authentication_error"` | A real credential problem. |
+
+The gateway's `on-error` section rewrites the guardrail 403 into an
+Anthropic-shaped body whose message says so explicitly, so the client at least
+prints the reason underneath its own misleading prefix. If you see the raw
+`{"statusCode":403,"message":"Request failed content safety check."}` instead,
+the `on-error` rewrite did not apply — redeploy the API policy.
+
 ### Guardrails silently stop blocking
 
-Both Content Safety calls use `ignore-error="true"`, so if the service is unreachable, throttled, or the managed identity loses its role assignment, requests proceed unscreened rather than failing. That is deliberate for a demo, and wrong for production.
+Content Safety runs inside the native `llm-content-safety` policy, which **fails open**: if the service is unreachable, throttled, or the managed identity loses its role assignment, requests proceed unscreened rather than failing. That is the policy's own behaviour and there is no attribute to change it.
 
 Verify Content Safety is reachable and the identity still has access:
 
@@ -294,7 +317,97 @@ Invoke-RestMethod -Method Post -Uri "$cs/contentsafety/text:analyze?api-version=
   -Body '{"text":"hello","outputType":"EightSeverityLevels"}'
 ```
 
-To fail closed instead, set `ignore-error="false"` on both `send-request` elements in `infra/policies/anthropic-api.xml` and redeploy. Content Safety being down will then take the API down with it.
+To fail closed instead, you would need an availability check around the policy — there is no `ignore-error` attribute to flip.
+
+### A harmful prompt gets through when a system prompt is present
+
+Content Safety scores a submission as a whole, so benign padding lowers the
+severity of harmful text sent alongside it. If the policy is inspecting the
+system prompt and the user turn **concatenated**, an ordinary system prompt is
+enough to drop a harmful prompt below the threshold — measured on this
+deployment, sixteen characters was enough.
+
+The fix is already in `infra/policies/anthropic-api.xml`: the two texts are
+probed **separately**, so neither can dilute the other. If you have edited the
+shim, check you have not merged them back into a single probe. Confirm with:
+
+```powershell
+./scripts/Test-NativePolicies.ps1 -Only ContentSafety
+```
+
+`harmful with system AS ARRAY (Claude app shape)` is the regression test for
+exactly this.
+
+### `The ListKeys operation is not supported when access keys are disabled`
+
+Registering the APIM external cache needs the Redis access key. From API version
+`2025-04-01` onward `accessKeysAuthentication` defaults to `Disabled`, and tenant
+policy may also turn it off. Two things have to be true:
+
+- `infra/modules/redis.bicep` sets `accessKeysAuthentication: 'Enabled'`.
+- The cache carries the `SecurityControl=Ignore` tag, which `main.bicep` applies
+  to every resource when `allowLocalAuthExemption` is `true`. Without it, policy
+  turns access keys straight back off.
+
+To repair an existing cache without redeploying everything:
+
+```powershell
+$o = Get-Content .deployment-outputs.json | ConvertFrom-Json
+az resource update `
+  --ids "/subscriptions/<sub>/resourceGroups/$($o.resourceGroupName)/providers/Microsoft.Cache/redisEnterprise/$($o.redisCacheName)/databases/default" `
+  --api-version 2025-07-01 --set properties.accessKeysAuthentication=Enabled
+```
+
+### The semantic cache never returns a hit
+
+Work down this list:
+
+```powershell
+# 1. Is the cache even deployed?
+Get-Content .deployment-outputs.json | ConvertFrom-Json |
+  Select-Object gatewaySemanticCacheEnabled, redisCacheName, embeddingDeploymentName
+
+# 2. Is Redis running, and does it have RediSearch?
+$o = Get-Content .deployment-outputs.json | ConvertFrom-Json
+az redisenterprise database show --cluster-name $o.redisCacheName `
+  -g $o.resourceGroupName -n default --query "{modules:modules[].name,clustering:clusteringPolicy}"
+```
+
+- **RediSearch missing.** It can only be enabled **at cache creation**. There is no way to add it afterwards — delete the cache and redeploy.
+- **`clusteringPolicy` is `OSSCluster`.** APIM's cache client is not cluster-aware. It must be `EnterpriseCluster`.
+- **No external cache registered.** APIM → *External cache* should list one named `default`. External cache requires **access-key** auth; Entra to Managed Redis is not supported.
+- **Everything looks right but nothing hits.** Raise `gatewaySemanticCacheScoreThreshold` — it is a *distance*, so the default `0.05` is strict by design. Also confirm the embeddings deployment exists on the Foundry account and that the gateway identity can reach it.
+- **Hits stopped after you changed callers.** The lookup is partitioned by `vary-by`: the caller identity, plus the optional `x-gateway-cache-scope` request header. Switching auth mode changes the caller key, so the new caller starts with a cold partition. That is intended — one tenant's answers must not leak to another.
+
+### The cache returns a hit when you wanted a fresh model call
+
+The mistake is almost always trying to defeat the cache with a random nonce in
+the prompt text:
+
+```jsonc
+// Does NOT force a miss. The lookup is semantic; the embedding ignores the GUID.
+{ "messages": [ { "role": "user", "content": "Name three primary colours. Ref 8f2a1c9d." } ] }
+```
+
+Two consecutive runs of that will hit, and the second reports
+`x-gateway-tokens-consumed: 0` — which looks exactly like a broken token metric
+and is not. Use the partition key instead:
+
+```http
+x-gateway-cache-scope: <a fresh GUID per run>
+```
+
+`scripts/Test-NativePolicies.ps1` does this, which is why its token assertions
+are repeatable. Set `gatewaySemanticCacheDurationSeconds` low, or
+`gatewaySemanticCache = false`, if you want the whole feature out of the way.
+
+### `AllocationFailed` deploying Azure Managed Redis
+
+`Request failed due to insufficient capacity. Retry using a different Azure Managed Redis size or region.`
+
+Managed Redis capacity is per region **per SKU**, and this is not a quota you can raise in the portal. We hit it on `eastus2` at both `Balanced_B0` and `Balanced_B1`, while `eastus` and `westus2` took `Balanced_B0` immediately. Set `redisLocation` to a neighbouring region and redeploy — cross-region external cache is supported and costs a few milliseconds per hit. Or set `gatewaySemanticCache = false` to drop the feature.
+
+Note the failure is **slow**: about six minutes before the allocation error surfaces, and a successful create takes 20–40 minutes.
 
 ### A harmful prompt got through, but only when it was pasted inside a large block of text
 
@@ -315,6 +428,45 @@ This is a documented limit, not a misconfiguration — see [08 — Guardrails](0
 Almost always the app is still on the `foundry` provider. The direct path has no guardrails at all — that is the entire finding in [08](08-guardrails.md). Check `inferenceProvider` in `.env`, re-run `./scripts/Set-ClaudeDesktopConfig.ps1`, and **fully quit the app from the tray icon** before reopening; configuration is read once at launch.
 
 If it is on `gateway` and still not blocking, check the size of the pasted turn (above), then reproduce in a terminal with `./scripts/Test-Guardrails.ps1 -PromptId jailbreak-dan` to get the status code and headers the app hides. [09 — Test prompts](09-test-prompts.md#a3--the-guardrail-demo-entirely-in-the-chat-window) has the in-app sequence.
+
+### Token metrics are empty
+
+Symptom: `x-gateway-tokens-consumed` is present on every response, so
+`llm-token-limit` is clearly working, but nothing appears under the
+`foundry-ai-gateway` metric namespace.
+
+Three separate causes, in the order worth checking:
+
+1. **`metrics: true` is missing from the API diagnostic.** This is the usual
+   one. Azure Monitor custom metrics are opt-in *per diagnostic entity*, the
+   portal does not expose the toggle, and without it `llm-emit-token-metric`
+   runs, raises no error and emits nothing. `apim-anthropic-api.bicep` sets it;
+   confirm on a live instance with:
+
+   ```powershell
+   $b = "https://management.azure.com/subscriptions/<sub>/resourceGroups/<rg>" +
+        "/providers/Microsoft.ApiManagement/service/<apim>"
+   $t = az account get-access-token --resource https://management.azure.com --query accessToken -o tsv
+   (Invoke-RestMethod -Uri "$b/apis/anthropic/diagnostics/applicationinsights?api-version=2024-05-01" `
+       -Headers @{ Authorization = "Bearer $t" }).properties.metrics
+   ```
+
+   An empty result means the flag is unset.
+
+2. **You are querying the wrong store.** The counts go to Azure Monitor metrics,
+   not to `customMetrics` / `AppMetrics` in Log Analytics. See
+   [Token spend](#token-spend).
+
+3. **Totals appear but will not split by `CallerId`.** Dimensions are dropped
+   until *Custom metrics (Preview) → With dimensions* is enabled on the
+   Application Insights component (Application Insights → **Usage and estimated
+   costs**). It is a portal-only preview setting: it cannot be expressed in
+   Bicep, and a `PUT` to the legacy `currentbillingfeatures` API is accepted and
+   then silently ignored. Until it is enabled a dimension filter returns zero
+   time series while the unfiltered totals are correct.
+
+Also note metric ingestion lags: allow **2–3 minutes** after generating traffic
+before concluding anything.
 
 ### `429` from the gateway
 
@@ -555,7 +707,7 @@ Anthropic models are Marketplace offerings. External-tenant and many trial subsc
 
 ## Useful queries
 
-**Gateway failures in the last hour**
+### Gateway failures in the last hour
 
 ```kusto
 requests
@@ -564,17 +716,33 @@ requests
 | order by timestamp desc
 ```
 
-**Token spend by caller**
+### Token spend
 
-```kusto
-customMetrics
-| where name == "Total Tokens" and timestamp > ago(24h)
-| extend caller = tostring(customDimensions["CallerId"])
-| summarize tokens = sum(value) by caller
-| order by tokens desc
+`llm-emit-token-metric` writes to the **Azure Monitor metrics store**, not to a
+Log Analytics table — a `customMetrics` / `AppMetrics` KQL query returns nothing
+even when the policy is working. Read it through the metrics API:
+
+```powershell
+$id  = "/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Insights/components/<appinsights>"
+$tok = az account get-access-token --resource https://management.azure.com --query accessToken -o tsv
+$ts  = "{0}/{1}" -f (Get-Date).ToUniversalTime().AddHours(-2).ToString('yyyy-MM-ddTHH:mm:ssZ'),
+                    (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+
+foreach ($n in 'Prompt Tokens','Completion Tokens','Total Tokens') {
+    $u = "https://management.azure.com$id/providers/microsoft.insights/metrics" +
+         "?api-version=2019-07-01&metricnamespace=foundry-ai-gateway" +
+         "&metricnames=$([uri]::EscapeDataString($n))&aggregation=total&interval=PT1H&timespan=$ts"
+    $r = Invoke-RestMethod -Uri $u -Headers @{ Authorization = "Bearer $tok" } -TimeoutSec 200
+    "{0} = {1}" -f $n, (($r.value.timeseries.data | Measure-Object total -Sum).Sum)
+}
 ```
 
-**Throttled callers**
+Splitting that by `CallerId` needs the dimensions preview enabled — see
+[Token metrics are empty](#token-metrics-are-empty). Use `az monitor metrics`
+rather than `az monitor app-insights`; the latter triggers an interactive
+extension-install prompt that hangs in a non-interactive shell.
+
+### Throttled callers
 
 ```kusto
 requests

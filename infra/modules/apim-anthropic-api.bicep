@@ -1,4 +1,4 @@
-// =============================================================================
+﻿// =============================================================================
 // Anthropic Messages API surface on the AI gateway.
 //
 // Publishes https://<apim>.azure-api.net/<path>/v1/messages and forwards to
@@ -96,6 +96,26 @@ param enableGuardrails bool = true
 @description('Azure AI Content Safety base URL, without a trailing slash. The Foundry AIServices account serves this on its own host, so no separate resource is required.')
 param contentSafetyEndpoint string = ''
 
+@description('''
+Content Safety base URL in the cognitiveservices.azure.com form. The native
+llm-content-safety policy validates the hostname of the backend it is pointed
+at and rejects the services.ai.azure.com alias, even though both resolve to the
+same AIServices account.
+''')
+param contentSafetyCognitiveEndpoint string = ''
+
+@description('Enable llm-semantic-cache-lookup and llm-semantic-cache-store on the API.')
+param enableSemanticCache bool = false
+
+@description('Runtime URL of the embeddings deployment used to vectorise prompts for the semantic cache.')
+param embeddingsBackendUrl string = ''
+
+@description('Similarity threshold for a semantic cache hit. Lower is stricter.')
+param semanticCacheScoreThreshold string = '0.05'
+
+@description('Seconds a cached completion stays valid.')
+param semanticCacheDurationSeconds int = 120
+
 @description('Resource the gateway managed identity requests a token for when calling Content Safety.')
 param contentSafetyTokenResource string = 'https://cognitiveservices.azure.com'
 
@@ -114,10 +134,16 @@ param guardrailSeverityThreshold int = 4
 param bodyLogBytes int = 8192
 
 var backendId = 'foundry-anthropic'
+var contentSafetyBackendId = 'content-safety'
+var embeddingsBackendId = 'embeddings'
 
 // Guardrails need somewhere to send the prompt; without an endpoint the policy
 // branch stays off rather than failing every request.
-var guardrailsActive = enableGuardrails && !empty(contentSafetyEndpoint)
+var guardrailsActive = enableGuardrails && !empty(contentSafetyCognitiveEndpoint)
+
+// The lookup policy needs an embeddings backend to vectorise the prompt. The
+// cache itself is registered separately, by the apim-cache module.
+var semanticCacheActive = enableSemanticCache && !empty(embeddingsBackendUrl)
 
 // ARM's deployments collection for the Foundry account. Model discovery reads
 // this with the gateway's managed identity, which already holds Cognitive
@@ -132,21 +158,51 @@ var policyXml = replace(
     replace(
       replace(
         replace(
-          replace(loadTextContent('../policies/anthropic-api.xml'), '__TOKENS_PER_MINUTE__', string(tokensPerMinute)),
-          '__BACKEND_ID__',
-          backendId
+          replace(
+            replace(
+              replace(
+                replace(
+                  replace(loadTextContent('../policies/anthropic-api.xml'), '__TOKENS_PER_MINUTE__', string(tokensPerMinute)),
+                  '__BACKEND_ID__',
+                  backendId
+                ),
+                '__MODEL_DISCOVERY__',
+                (enableModelDiscovery && !empty(foundryAccountResourceId)) ? 'enabled' : 'disabled'
+              ),
+              '__DISCOVERY_CACHE_SECONDS__',
+              string(modelDiscoveryCacheSeconds)
+            ),
+            '__GUARDRAILS__',
+            guardrailsActive ? 'enabled' : 'disabled'
+          ),
+          '__GUARDRAIL_SEVERITY_THRESHOLD__',
+          string(guardrailSeverityThreshold)
         ),
-        '__MODEL_DISCOVERY__',
-        (enableModelDiscovery && !empty(foundryAccountResourceId)) ? 'enabled' : 'disabled'
+        '__CONTENT_SAFETY_BACKEND_ID__',
+        contentSafetyBackendId
       ),
-      '__DISCOVERY_CACHE_SECONDS__',
-      string(modelDiscoveryCacheSeconds)
+      '__SEMANTIC_CACHE__',
+      semanticCacheActive ? 'enabled' : 'disabled'
     ),
-    '__GUARDRAILS__',
-    guardrailsActive ? 'enabled' : 'disabled'
+    '__EMBEDDINGS_BACKEND_ID__',
+    embeddingsBackendId
   ),
-  '__GUARDRAIL_SEVERITY_THRESHOLD__',
-  string(guardrailSeverityThreshold)
+  '__CACHE_SCORE_THRESHOLD__',
+  semanticCacheScoreThreshold
+)
+
+// The semantic cache policies have no "disabled" attribute and cannot sit inside
+// a <choose>, so when the cache is switched off they are commented out of the
+// policy document instead. The markers become empty strings when enabled and
+// XML comment delimiters when not.
+var policyXmlWithCache = replace(
+  replace(
+    replace(policyXml, '__CACHE_DURATION_SECONDS__', string(semanticCacheDurationSeconds)),
+    '__CACHE_OPEN__',
+    semanticCacheActive ? '' : '<!--'
+  ),
+  '__CACHE_CLOSE__',
+  semanticCacheActive ? '' : '-->'
 )
 
 resource apim 'Microsoft.ApiManagement/service@2024-05-01' existing = {
@@ -271,6 +327,49 @@ resource foundryBackend 'Microsoft.ApiManagement/service/backends@2024-05-01' = 
   }
 }
 
+// The native llm-content-safety policy resolves its Content Safety target
+// through a backend entity rather than a URL, and insists on two things: the
+// hostname must be the cognitiveservices.azure.com form, and the credentials
+// must be a managed identity with an exact resource of
+// https://cognitiveservices.azure.com. A trailing slash on that resource value
+// is rejected.
+resource contentSafetyBackend 'Microsoft.ApiManagement/service/backends@2024-05-01' = if (guardrailsActive) {
+  parent: apim
+  name: contentSafetyBackendId
+  properties: {
+    title: 'Azure AI Content Safety'
+    description: 'Content Safety data plane on the Foundry AIServices account, used by the native llm-content-safety policy.'
+    protocol: 'http'
+    url: contentSafetyCognitiveEndpoint
+    credentials: {
+      #disable-next-line BCP037
+      managedIdentity: {
+        resource: 'https://cognitiveservices.azure.com'
+      }
+    }
+  }
+}
+
+// Vectoriser for the semantic cache. llm-semantic-cache-lookup posts the
+// extracted prompt here and compares the returned embedding against stored
+// vectors, so this points at the embeddings deployment rather than a Claude one.
+resource embeddingsBackend 'Microsoft.ApiManagement/service/backends@2024-05-01' = if (semanticCacheActive) {
+  parent: apim
+  name: embeddingsBackendId
+  properties: {
+    title: 'Foundry embeddings'
+    description: 'Embeddings deployment used by llm-semantic-cache-lookup to vectorise prompts.'
+    protocol: 'http'
+    url: embeddingsBackendUrl
+    credentials: {
+      #disable-next-line BCP037
+      managedIdentity: {
+        resource: 'https://cognitiveservices.azure.com'
+      }
+    }
+  }
+}
+
 // -- API ---------------------------------------------------------------------
 
 resource anthropicApi 'Microsoft.ApiManagement/service/apis@2024-05-01' = {
@@ -351,7 +450,7 @@ resource apiPolicy 'Microsoft.ApiManagement/service/apis/policies@2024-05-01' = 
   name: 'policy'
   properties: {
     format: 'rawxml'
-    value: policyXml
+    value: policyXmlWithCache
   }
   dependsOn: [
     nvClientAuthMode
@@ -364,6 +463,8 @@ resource apiPolicy 'Microsoft.ApiManagement/service/apis/policies@2024-05-01' = 
     nvContentSafetyEndpoint
     nvContentSafetyTokenResource
     foundryBackend
+    contentSafetyBackend
+    embeddingsBackend
     opCreateMessage
     opCountTokens
     opListModels
@@ -380,6 +481,12 @@ resource apiDiagnostic 'Microsoft.ApiManagement/service/apis/diagnostics@2024-05
     alwaysLog: 'allErrors'
     httpCorrelationProtocol: 'W3C'
     verbosity: 'information'
+    // Without this, llm-emit-token-metric runs and silently emits nothing.
+    // Azure Monitor custom metrics are opt-in per diagnostic entity, and the
+    // portal does not surface the toggle. Note the counts land in the Azure
+    // Monitor metrics store under the policy's namespace, not in the
+    // AppMetrics Log Analytics table.
+    metrics: true
     sampling: {
       samplingType: 'fixed'
       percentage: 100
