@@ -2,6 +2,8 @@
 
 A 25-minute run of show. Everything below has been rehearsed against the deployed template; timings assume the environment is already deployed and warm.
 
+For the prompts themselves — every scenario, with expected output and the reason each one is worth showing — see [09 — Test prompts](09-test-prompts.md). This document is the *timing and narrative*; that one is the *material*.
+
 ## Before you start
 
 - [ ] Deployment finished; `.deployment-outputs.json` exists at the repo root.
