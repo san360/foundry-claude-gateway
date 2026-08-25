@@ -170,11 +170,84 @@ order of effort:
 | Approach | Notes |
 | --- | --- |
 | **APIM + Content Safety** (this repo) | Central, client-agnostic, no application change. Existing clients like Claude Code work unmodified. |
+| APIM's built-in `llm-content-safety` policy | Less code than the above — but it **fails open on the payload shape the Claude apps send**. Measured below. Do not use it as your only control. |
 | Call Content Safety from your own app | Fine when you own every caller. Falls apart with third-party clients such as Claude Desktop. |
 | Foundry Agent Service guardrails | If you consume Claude through agents rather than raw model inference, evaluate guardrails at the agent layer. **Not tested here** — the same "sold by Azure" scoping language appears in that documentation, so verify before relying on it. |
 
-All three end up calling the same Azure AI Content Safety classifiers. The
+All of these end up calling the same Azure AI Content Safety classifiers. The
 question is only *where* you put the call.
+
+### Why not APIM's built-in `llm-content-safety` policy?
+
+APIM ships an [`llm-content-safety`][llm-cs] policy that wires a request into
+Content Safety declaratively, replacing most of the hand-written block in
+`infra/policies/anthropic-api.xml`. It is the obvious thing to reach for, so we
+tested it against Claude on a throwaway API rather than guessing.
+
+**It is not documented as supported for Anthropic.** Every neighbouring policy —
+[`llm-token-limit`][llm-tl], `llm-emit-token-metric`, `llm-semantic-cache-lookup`
+— carries an explicit *"Supported model APIs"* section listing *"Anthropic
+Messages API (currently supported in API Management v2 tiers)"*. The
+`llm-content-safety` page has **no such section**. That silence turned out to be
+meaningful.
+
+What we measured on our BasicV2 gateway, against the same nine-prompt corpus:
+
+| Case | Built-in `llm-content-safety` | This repo's policy |
+| --- | --- | --- |
+| 6 harmful / jailbreak prompts, simple body | blocked 6/6 | blocked 6/6 |
+| 3 benign controls | allowed 3/3 | allowed 3/3 |
+| `content` as a block array, multi-turn, `tools` present | blocked | blocked |
+| **`system` sent as an array of blocks** | **allowed — not inspected at all** | blocked |
+| Jailbreak buried mid-way through a 9.8 KB paste | blocked | allowed (see [Design decisions](#design-decisions-and-limits)) |
+| Benign 12 KB paste | **403 false positive** | allowed |
+| Response / completion screening | **not inspected** | not implemented |
+| Error body | generic `{"statusCode":403,"message":"..."}` | Anthropic-shaped, with `x-guardrail-*` headers |
+
+Two of those rows are disqualifying.
+
+**The `system`-array fail-open.** The Anthropic Messages API accepts `system` as
+either a string or an array of content blocks. Claude Desktop and Claude Code
+send the **array** form. When `system` is an array, the built-in policy does not
+merely mis-score the request — it skips inspection entirely. We proved this by
+setting every category to `threshold="0"`, which blocks *any* request the policy
+actually looks at:
+
+| Request | Result under `threshold="0"` |
+| --- | --- |
+| benign, no `system` field | 403 — inspected |
+| benign, `system` as a string | 403 — inspected |
+| benign, `system` as an **array** | **200 — never inspected** |
+
+A control that a client bypasses by using a documented, extremely common field
+encoding is not a control. There is no error, no header and no log line — just a
+normal model answer.
+
+**Response screening does not work either.** The policy supports an outbound
+direction, which would be a genuine addition since our policy only screens
+requests. Under the same `threshold="0"` proof, a benign Anthropic *response*
+came back `200` — the outbound policy never parsed it.
+
+**Conclusion.** Keep the hand-written policy. It parses every Anthropic body
+shape, returns errors the Claude clients render properly, and emits the headers
+the tests and the demo rely on. The built-in policy's one real advantage — it
+inspects a full 10,000-character window, so it catches the mid-document
+injection we miss — comes bundled with hard 403s on large benign pastes, which
+would break exactly the long-context coding workflows this gateway exists to
+serve.
+
+If you want that advantage without the false positives, the fix belongs in
+*our* policy: chunk the prompt and make several Content Safety calls instead of
+[sampling head and tail](#design-decisions-and-limits). That closes the gap
+without inheriting either fail-open.
+
+> Measured on APIM BasicV2 in `eastus2`. The test API and its Content Safety
+> backend were deleted afterwards; nothing in `infra/` references them. Worth
+> re-testing before you rely on this conclusion — a fail-open this clear reads
+> like a bug, and may well be fixed.
+
+[llm-cs]: https://learn.microsoft.com/en-us/azure/api-management/llm-content-safety-policy
+[llm-tl]: https://learn.microsoft.com/en-us/azure/api-management/llm-token-limit-policy
 
 ---
 
