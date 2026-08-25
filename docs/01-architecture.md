@@ -3,8 +3,14 @@
 ## The two paths
 
 > A rendered version of everything below — both paths, the policy pipeline and the
-> guardrail decision flow — is in [`diagrams/architecture.drawio`](diagrams/architecture.drawio)
-> (two pages; open with draw.io or the VS Code Draw.io Integration extension).
+> guardrail decision flow — is in [`diagrams/architecture.drawio`](diagrams/architecture.drawio).
+> Open it with draw.io or the VS Code Draw.io Integration extension. Three pages:
+>
+> | Page | What it shows |
+> |---|---|
+> | `1. Architecture` | Both paths side by side, the five inbound policy steps in order, and where each credential comes from |
+> | `2. One prompt, step by step` | A single request followed down each path, including both guardrail decision points and the 403 shape |
+> | `3. Why Azure's filter does not apply` | The documented citation chain behind [08 — Guardrails](08-guardrails.md#why-the-platform-filter-does-not-apply), as a diagram |
 
 Both paths speak the **Anthropic Messages API**. Nothing about the client payload changes between them — only the base URL and the credential. That is deliberate: it is what makes the gateway a drop-in insertion point rather than a migration.
 

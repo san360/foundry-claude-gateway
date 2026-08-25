@@ -148,7 +148,8 @@ samples/
   python/hello_claude.py         Anthropic SDK, all four path/credential combos
   rest/anthropic.http            raw HTTP requests for VS Code REST Client
 docs/                            see the table above
-  diagrams/architecture.drawio   architecture and guardrail user flow (2 pages)
+  diagrams/architecture.drawio   architecture, prompt walkthrough, and the guardrail
+                                 citation chain (3 pages)
 ```
 
 ## Key facts worth knowing before you demo

@@ -375,4 +375,4 @@ protected-material detectors, which are output-side.
 - [04 — Claude Code via the AI gateway](04-claude-code-gateway.md) — the rest of the policy
 - [06 — Demo script](06-demo-script.md) — Act 5d runs this live
 - [09 — Test prompts](09-test-prompts.md#a3--the-guardrail-demo-entirely-in-the-chat-window) — running the guardrail demo inside Claude Desktop, no terminal
-- [`docs/diagrams/architecture.drawio`](diagrams/architecture.drawio) — both paths and the enforcement points
+- [`docs/diagrams/architecture.drawio`](diagrams/architecture.drawio) — page 3, `Why Azure's filter does not apply`, is this section as a diagram; pages 1 and 2 show both paths and the enforcement points
