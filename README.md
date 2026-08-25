@@ -222,14 +222,21 @@ Five findings from that exercise are worth reading before you present this:
    `subscriptionRequired = false` and enforce credentials in policy instead, or
    Entra-only callers are rejected before `validate-azure-ad-token` is ever reached.
 
-5. **Azure's RAI content filter does not run for Claude.** `raiPolicyName` is accepted on
-   the deployment and echoed back by ARM, but nothing enforces it � a custom policy
-   blocking every category at the lowest threshold still let a mass-casualty prompt
-   through with `200`. Every refusal on the direct path is Claude's own alignment, wrapped
-   in a `200` that looks exactly like a normal answer, so it cannot be alerted on or
-   counted. The gateway closes this with Azure AI Content Safety, which needs **no extra
-   resource and no extra role assignment** because the same AIServices account serves it.
-   [docs/08-guardrails.md](docs/08-guardrails.md) has the proof and the reproduction.
+5. **Azure's RAI content filter does not run for Claude — by design, not by accident.**
+   Microsoft scopes the guardrail system to *"all Foundry Models sold by Azure"*, and
+   Claude is sold and operated by Anthropic under *Foundry Models from partners and
+   community* — for **both** hosting options, since "Hosted on Azure" changes where
+   inference runs, not who sells the model. Microsoft names *"Anthropic safety systems"*
+   as the active layer instead. The trap is that `raiPolicyName` is still accepted on the
+   deployment and echoed back by ARM: a custom policy blocking every category at the
+   lowest threshold still let a mass-casualty prompt through with `200`. A control that
+   is configured, reported and inert is worse than an absent one, because it passes
+   review. Every refusal on the direct path is Claude's own alignment, wrapped in a `200`
+   that looks exactly like a normal answer, so it cannot be alerted on or counted. The
+   gateway closes this with Azure AI Content Safety, which needs **no extra resource and
+   no extra role assignment** because the same AIServices account serves it.
+   [docs/08-guardrails.md](docs/08-guardrails.md) has the citations, the proof and the
+   reproduction.
 
 Full evidence, request/response transcripts and the exact error strings are in
 [docs/05-entra-authentication.md](docs/05-entra-authentication.md),

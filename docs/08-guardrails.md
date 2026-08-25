@@ -81,31 +81,65 @@ Then send a prompt that this policy says must be blocked:
 
 ## Why the platform filter does not apply
 
-Microsoft's documentation never says "content filtering does not apply to
-Claude" in one sentence, which is why this is easy to get wrong. It follows from
-three things that are documented:
+This is documented, though it takes three hops to assemble and no single page
+states it as "content filtering does not apply to Claude" — which is why it is
+easy to get wrong.
 
-1. **Azure RAI content filtering is documented for Azure OpenAI and models sold
-   directly by Azure.** Every worked example — `finish_reason: content_filter`,
-   `content_filter_results`, the HTTP 400 error shape — is expressed in Azure
-   OpenAI Chat Completions JSON. Claude's Messages API does not produce those
-   fields, and the filter pipeline sits on the Azure OpenAI inference path.
-2. **For Claude, Microsoft documents "Anthropic safety systems" as the active
-   layer**, for both hosting options, and tells customers to implement their own
-   additional measures. That is a customer-responsibility statement.
-3. **Microsoft Defender for Cloud AI threat protection does not list the
-   Anthropic surface** among supported services either.
+**1. The guardrail system is scoped to models sold by Azure.** From
+[Guardrails and controls overview](https://learn.microsoft.com/azure/foundry/guardrails/guardrails-overview):
 
-`raiPolicyName` is settable because it lives on
-`Microsoft.CognitiveServices/accounts/deployments`, an ARM resource type shared
-by every deployment flavour on the account. Accepting the property is not the
-same as enforcing it. If you add an OpenAI-format deployment to this same
-account, `claude-strict` *will* apply to that one.
+> **Important**: The guardrail system applies to all **Foundry Models sold by
+> Azure**, except for prompts and completions processed by audio transcription
+> models.
 
-> Treat this as a point-in-time finding. It is worth re-running
-> `Test-Guardrails.ps1` after Foundry updates — the Bicep already declares the
-> correct posture, so if Microsoft enables enforcement you will get it for free,
-> and the test will start reporting `BLOCKED-PLATFORM`.
+**2. Claude is not in that category.** The
+[Foundry Models sold by Azure](https://learn.microsoft.com/azure/foundry/foundry-models/concepts/models-sold-directly-by-azure)
+catalogue covers Azure OpenAI, Microsoft, Black Forest Labs, Moonshot AI and xAI.
+Anthropic does not appear on it. From
+[Claude models in Microsoft Foundry](https://learn.microsoft.com/azure/foundry/foundry-models/concepts/claude-models):
+
+> You access Claude models in Microsoft Foundry through **Foundry Models from
+> partners and community**. Models from partners and community that Anthropic
+> sells and operates are **Non-Microsoft Products** under the Product Terms.
+
+This holds for **both** hosting options. "Hosted on Azure" changes where
+inference runs, not who sells and operates the model — per
+[Compare hosting options](https://learn.microsoft.com/azure/foundry/foundry-models/concepts/claude-models-hosting-comparison),
+"for both hosting options, Anthropic is the seller and operator." Running on
+Azure silicon does not move Claude into the Azure guardrail system.
+
+**3. Microsoft names a different safety layer for Claude.** The same comparison
+table lists **Content safety: "Anthropic safety systems active"** for both
+hosting options — not Azure content filters. The
+[Claude data privacy note](https://learn.microsoft.com/azure/foundry/responsible-ai/claude-models/data-privacy)
+is more explicit:
+
+> Claude models in Microsoft Foundry use **Anthropic safety systems and
+> safeguards**, supported by Microsoft. To learn more about harmful content
+> screening, safety review, and Anthropic-specific processing, see **Anthropic's
+> documentation**.
+
+Pointing customers at the model vendor's documentation for harmful-content
+screening is the tell. The screening is real, but it is the model's, not a
+control surface Azure gives you.
+
+### So why does `raiPolicyName` succeed?
+
+Because it lives on `Microsoft.CognitiveServices/accounts/deployments`, an ARM
+resource type shared by every deployment flavour on the account. ARM accepts and
+echoes the property for any deployment; enforcement is a property of the
+inference path, and the RAI filter pipeline sits on the Azure OpenAI path. Add an
+OpenAI-format deployment to this same account and `claude-strict` *will* apply to
+that one.
+
+This is the trap worth showing a customer: the portal and ARM both report a
+strict policy attached, `az` confirms it, and nothing enforces it. A configured,
+reported, inert control is worse than an absent one, because it passes review.
+
+> Treat this as a point-in-time finding, verified on this deployment. It is worth
+> re-running `Test-Guardrails.ps1` after Foundry updates — the Bicep already
+> declares the correct posture, so if Microsoft extends enforcement you get it
+> for free and the test starts reporting `BLOCKED-PLATFORM`.
 
 ---
 
@@ -120,6 +154,27 @@ account, `claude-strict` *will* apply to that one.
 Only the first row is yours. That is the entire argument for the gateway
 scenario, and it is why the two paths in this repo are worth demonstrating
 side by side.
+
+The middle row is not a criticism of Anthropic's safety work — it is genuinely
+strong, and in our corpus it refused 5 of 6 harmful prompts unprompted. But a
+refusal you cannot configure, cannot threshold, cannot log to your SIEM and
+cannot prove to an auditor is not a control. And it is not complete: the
+`jailbreak-dan` probe was **answered outright**, not refused.
+
+### If you need Azure-native guardrails on Claude
+
+The enforcement point has to sit **outside the model deployment**, because that
+is the boundary the Azure guardrail system does not cross. Options, in rough
+order of effort:
+
+| Approach | Notes |
+| --- | --- |
+| **APIM + Content Safety** (this repo) | Central, client-agnostic, no application change. Existing clients like Claude Code work unmodified. |
+| Call Content Safety from your own app | Fine when you own every caller. Falls apart with third-party clients such as Claude Desktop. |
+| Foundry Agent Service guardrails | If you consume Claude through agents rather than raw model inference, evaluate guardrails at the agent layer. **Not tested here** — the same "sold by Azure" scoping language appears in that documentation, so verify before relying on it. |
+
+All three end up calling the same Azure AI Content Safety classifiers. The
+question is only *where* you put the call.
 
 ---
 
