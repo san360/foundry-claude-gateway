@@ -918,6 +918,59 @@ the customer can keep running after you leave.
 
 ---
 
+## Leaving evidence behind
+
+Verbal claims age badly. `Test-Guardrails.ps1` writes a self-contained evidence
+bundle on every run — one artifact set per path, with the full request, the full
+response, the headers and the status code for each probe:
+
+```powershell
+./scripts/Test-Guardrails.ps1                        # writes results/guardrails-<stamp>/
+./scripts/Test-Guardrails.ps1 -ReportPath C:\evidence # somewhere else
+./scripts/Test-Guardrails.ps1 -NoReport              # console only
+```
+
+| File | What it is |
+| --- | --- |
+| `comparison.md` | The one-page answer. Same prompts down the rows, direct status vs gateway status across. This is the page to paste into a report. |
+| `direct.md` / `gateway.md` | Human-readable capture per path: every probe's request line, headers, body, then the response status, headers and body. |
+| `direct.json` / `gateway.json` | The same content structured, for anyone who wants to diff or assert against it. |
+| `summary.json` | Machine-readable roll-up — counts per path plus a status-code histogram such as `200x3 403x6`. |
+
+A real run of the nine-prompt corpus produces:
+
+| Path | Harmful stopped before the model | Benign allowed | Status codes |
+| --- | --- | --- | --- |
+| Direct | 0 of 6 | 3 of 3 | `200x9` |
+| Gateway | **6 of 6** | 3 of 3 | `200x3 403x6` |
+
+That `200x9` against `200x3 403x6` is the entire argument for the gateway in one
+line: identical client, identical prompts, identical model, and the only path
+that produced an enforcement decision is the one with API Management in it.
+
+The captured 403s carry the proof headers, so nobody has to take the outcome
+column on faith:
+
+```text
+x-gateway-error            : ContentSafetyPolicyViolated
+x-guardrail-blocked        : content-safety
+x-guardrail-enforced-by    : apim-llm-content-safety
+```
+
+Two things to know before you share a bundle:
+
+- **Credentials are redacted.** Header *names* are kept, values for
+  `authorization`, `x-api-key`, `api-key` and `ocp-apim-subscription-key` are
+  replaced with `***redacted***`. The bundle shows which scheme was used without
+  showing the secret.
+- **`results/` is gitignored, deliberately.** The direct-path capture contains
+  the model's full replies to harmful and jailbreak prompts. Claude usually
+  refuses, but a refusal transcript is still a document full of the original
+  harmful prompts. Hand over `comparison.md` and `summary.json`; keep the
+  per-probe bodies local unless you have read them.
+
+---
+
 ## See also
 
 - [06 — Demo script](06-demo-script.md) — the timed run-of-show these prompts slot into

@@ -15,6 +15,11 @@ infra/**/*.json
 .env.*
 !.env.example
 
+# Guardrail evidence bundles. These contain full model responses to deliberately
+# harmful probe prompts - on the direct path the model sometimes complies - so
+# they stay local. Share a redacted extract, not the raw bundle.
+results/
+
 # Python
 __pycache__/
 *.py[cod]

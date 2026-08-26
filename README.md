@@ -103,7 +103,8 @@ claude
 
 # 5. Prove the guardrails. Fires 9 probe prompts down both paths and reports
 #    who stopped each one. The gateway blocks all six attacks; the direct
-#    path blocks none of them.
+#    path blocks none of them. Writes an evidence bundle to results/ with the
+#    request, response, headers and status code captured per path.
 ./scripts/Test-Guardrails.ps1
 ```
 
@@ -148,6 +149,7 @@ scripts/
   Test-Guardrails.ps1            prove guardrails: gateway vs direct, side by side
   guardrail-prompts.json         9-prompt probe corpus (3 benign controls, 6 attacks)
 .env.example                     annotated reference for every client setting
+results/                         evidence bundles from Test-Guardrails.ps1 (gitignored)
 samples/
   python/hello_claude.py         Anthropic SDK, all four path/credential combos
   rest/anthropic.http            raw HTTP requests for VS Code REST Client
@@ -209,6 +211,7 @@ on 2026-08-21 (`eastus2`, API Management `BasicV2`, Foundry with `claude-haiku-4
 | `llm-semantic-cache-lookup` / `-store` on Azure Managed Redis | identical **and reworded** prompts replay the byte-identical stored completion in ~0.6 s for zero tokens; unrelated prompts miss |
 | Guardrail `403` versus a real auth failure | `403` + `x-guardrail-blocked: content-safety` vs `401 authentication_error` — never ambiguous |
 | `scripts/Test-NativePolicies.ps1` end to end | **16 of 16 pass** (8 content safety, 4 token, 4 cache) |
+| `scripts/Test-Guardrails.ps1` end to end | direct stops **0 of 6** harmful prompts (`200x9`), gateway stops **6 of 6** (`200x3 403x6`), both allow 3 of 3 benign |
 | Guardrail latency cost | ~93 ms (direct 725 ms, gateway 818 ms) |
 
 Five findings from that exercise are worth reading before you present this:
