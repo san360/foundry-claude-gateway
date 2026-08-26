@@ -11,8 +11,11 @@ Both paths support **Microsoft Entra ID authentication with no API keys at all**
 |---|---|---|
 | **Entra ID** | user's own token, RBAC-enforced | token validated at the edge, gateway calls Foundry with its managed identity |
 | **API key** | Foundry account key | per-consumer APIM subscription key; the client never holds a Foundry secret |
+| **Entra interactive sign-in** | — | user signs in inside Claude Desktop; **no consent, no admin, no Foundry role**, access decided by Entra group |
 
 Key auth needs `disableLocalAuth = false`, which tenant policy permits only on resources tagged `SecurityControl=Ignore` — applied by default via `allowLocalAuthExemption`. Entra remains the recommended credential; keys exist because a hardened tenant may block the consent that Claude *Desktop*'s app registration requires.
+
+If that consent block is your problem, the third row is the real answer: it swaps the Microsoft-owned scope for one on an application you own, which can be pre-authorized so **no consent prompt is raised at all**. See [Scenario C](docs/05-entra-authentication.md#scenario-c--gateway-interactive-sign-in-from-claude-desktop).
 
 ```mermaid
 flowchart LR
@@ -101,6 +104,15 @@ claude
 #     gateway afterwards is an edit to inferenceProvider in .env.
 ./scripts/New-ClaudeConfig.ps1 -Mode Direct -CredentialKind static -Apply
 
+# 4c. Or keep Entra and drop the consent requirement entirely, by signing in
+#     against an app you own instead of a Microsoft-owned API. Pre-authorization
+#     means no prompt at all - user or admin - and the user needs no Foundry
+#     role, because the gateway calls Foundry with its managed identity.
+#     Access is then decided from the Entra groups claim, at the gateway.
+$sso = ./scripts/New-GatewaySsoAppRegistration.ps1 -AllowedGroup 'Claude Gateway Users'
+./scripts/deploy.ps1 -GatewaySsoAppId $sso.clientId -AllowedGroupId $sso.allowedGroups
+./scripts/New-ClaudeConfig.ps1 -Mode Gateway -GatewaySsoClientId $sso.clientId -Apply
+
 # 5. Prove the guardrails. Fires 9 probe prompts down both paths and reports
 #    who stopped each one. The gateway blocks all six attacks; the direct
 #    path blocks none of them. Writes an evidence bundle to results/ with the
@@ -144,6 +156,7 @@ scripts/
   Test-ClaudeEndpoint.ps1        smoke test either path, either credential
   Set-GatewayAuthMode.ps1        switch auth topology live, without redeploying
   New-FoundryAppRegistration.ps1 create the Entra public-client app (idempotent)
+  New-GatewaySsoAppRegistration.ps1 create the gateway sign-in app - no consent needed
   New-ClaudeConfig.ps1           write .env describing both providers, optionally apply
   Set-ClaudeDesktopConfig.ps1    apply .env to Claude Desktop; export reg/plist/JSON
   Test-Guardrails.ps1            prove guardrails: gateway vs direct, side by side
@@ -213,6 +226,12 @@ on 2026-08-21 (`eastus2`, API Management `BasicV2`, Foundry with `claude-haiku-4
 | `scripts/Test-NativePolicies.ps1` end to end | **16 of 16 pass** (8 content safety, 4 token, 4 cache) |
 | `scripts/Test-Guardrails.ps1` end to end | direct stops **0 of 6** harmful prompts (`200x9`), gateway stops **6 of 6** (`200x3 403x6`), both allow 3 of 3 benign |
 | Guardrail latency cost | ~93 ms (direct 725 ms, gateway 818 ms) |
+| Scenario C — token for a scope on an app we own, restricted-consent tenant | issued with **no consent grant and no admin**; pre-authorization suppresses the prompt |
+| Scenario C — `groups` claim with `ApplicationGroup` | exactly the one assigned group; **no `_claim_names` overage** despite a very large directory |
+| Scenario C — group member calls `/v1/messages` via gateway | `200`, model replied |
+| Scenario C — non-member calls `/v1/messages` via gateway | `403` + `x-gateway-error: GroupNotAuthorized`, `x-gateway-authz-reason: not-member` |
+| Scenario C — existing Entra and subscription-key paths after the change | `200` on both — no regression |
+| Scenario C — `inferenceGatewayOidc` round-trip `.env` → registry/plist/JSON | decodes back to valid JSON in all three exports |
 
 Five findings from that exercise are worth reading before you present this:
 

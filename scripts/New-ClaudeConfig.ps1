@@ -78,11 +78,28 @@
     custom app registration, which makes passthrough incompatible with Claude
     Desktop's gateway sign-in.
 
+.PARAMETER GatewaySsoClientId
+    Client ID of the dedicated gateway sign-in app registration produced by
+    scripts/New-GatewaySsoAppRegistration.ps1. When supplied it takes precedence
+    over -ClientId and -GatewayAudience for the gateway provider block.
+
+    This is the preferred way to configure interactive sign-in at the gateway.
+    The alternative - reusing the Foundry app registration and asking for a
+    Cognitive Services token - depends on a scope on an API Microsoft owns, which
+    you cannot pre-authorize, so a tenant with restricted consent stops every
+    user at "Need admin approval". A token for an app you own has no such
+    problem: pre-authorization suppresses the consent prompt outright, and the
+    user never needs any permission on Foundry because the gateway calls Foundry
+    with its own managed identity.
+
 .EXAMPLE
     ./scripts/New-ClaudeConfig.ps1 -Mode Direct -CreateAppRegistration -Apply
 
 .EXAMPLE
     ./scripts/New-ClaudeConfig.ps1 -Mode Gateway -ClientId 5941e251-... -Apply
+
+.EXAMPLE
+    ./scripts/New-ClaudeConfig.ps1 -Mode Gateway -GatewaySsoClientId e62d4098-... -Apply
 #>
 [CmdletBinding()]
 param(
@@ -104,6 +121,10 @@ param(
     [string]$TenantId,
 
     [string]$GatewayAudience,
+
+    [string]$GatewaySsoClientId,
+
+    [string]$GatewaySsoScope = 'Gateway.Access',
 
     [string]$UserContentRendererUrl,
 
@@ -144,7 +165,7 @@ if ($CreateAppRegistration) {
     $TenantId = $reg.TenantId
 }
 
-if ($CredentialKind -eq 'interactive' -and -not $ClientId) {
+if ($CredentialKind -eq 'interactive' -and -not $ClientId -and -not ($Mode -eq 'Gateway' -and $GatewaySsoClientId)) {
     throw @'
 Interactive sign-in needs a Microsoft Entra ID app registration.
 
@@ -374,7 +395,41 @@ if ($o.gatewayAnthropicBaseUrl) {
         Add-Line ''
     }
 
-    if ($ClientId) {
+    if ($GatewaySsoClientId) {
+        # Preferred interactive path. The token's audience is an application you
+        # own, so the scope can be pre-authorized and no consent prompt is
+        # raised - neither admin nor user. Contrast the branch below, which asks
+        # for a scope on Microsoft's Cognitive Services API: you cannot
+        # pre-authorize an API you do not own, so a tenant with restricted
+        # consent stops every user at "Need admin approval".
+        Add-Line '# --- Gateway interactive sign-in (preferred) ---'
+        Add-Line '# Entra ID sign-in against a dedicated app registration that exists only'
+        Add-Line '# to be an audience. Claude mints an access token for it and sends it as'
+        Add-Line '# Authorization: Bearer; the gateway validates issuer, signature and'
+        Add-Line '# audience, then calls Foundry with its own managed identity. The user'
+        Add-Line '# therefore needs no permission on Foundry at all.'
+        Add-Line '#'
+        Add-Line '# Because the client is pre-authorized for this scope, sign-in raises no'
+        Add-Line '# consent prompt and needs no administrator. Authorization is decided'
+        Add-Line '# separately, from the groups claim, at the gateway.'
+        Add-Line '#'
+        Add-Line '# One key holding a JSON string - not dotted sub-keys.'
+
+        $oidc = [ordered]@{
+            issuer    = "https://login.microsoftonline.com/$TenantId/v2.0"
+            clientId  = $GatewaySsoClientId
+            tokenType = 'access_token'
+            scopes    = @('openid', 'profile', 'email', "api://$GatewaySsoClientId/$GatewaySsoScope")
+        } | ConvertTo-Json -Compress
+        Add-Setting 'inferenceGatewayOidc' $oidc
+
+        # tokenType=access_token makes Claude append offline_access itself, so
+        # the session refreshes silently instead of dying with the hour-long
+        # access token.
+        Add-Setting 'inferenceGatewayOidcAuthFlow' $(if ($AuthFlow -eq 'broker') { 'broker' } else { 'browser' })
+        Add-Line ''
+    }
+    elseif ($ClientId) {
         Add-Line '# Entra ID sign-in, used only when inferenceCredentialKind=interactive.'
         Add-Line '# Claude mints an access token for the audience the gateway validates'
         Add-Line '# and sends it as Authorization: Bearer.'

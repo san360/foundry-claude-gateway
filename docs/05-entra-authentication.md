@@ -15,8 +15,11 @@
 | 5 | **Gateway** | **Entra token, validated at the edge** | **gateway managed identity** | **the gateway** | **✓ recommended** |
 | 6 | Gateway | Entra token, validated at the edge | same token passed through | **the end user** | ✓ |
 | 7 | Gateway | APIM subscription key | passthrough | *(no bearer token)* | ✗ invalid combination |
+| 8 | **Gateway** | **Entra interactive sign-in from inside Claude Desktop** | **gateway managed identity** | **the gateway** | **✓ no admin consent** |
 
 Rows 2, 5 and 6 are entirely key-free. Row 4 is the best of the key-based options: the client holds a per-consumer, individually revocable gateway key and never sees a Foundry credential.
+
+Row 8 is the one to reach for when the tenant will not grant admin consent. It is the only option here where a user signs in from inside the app, holds no secret, and needs no permission on Foundry — see [Scenario C](#scenario-c--gateway-interactive-sign-in-from-claude-desktop).
 
 ## Scenario A — Direct: Claude Code → Foundry with Entra
 
@@ -137,6 +140,8 @@ $env:ANTHROPIC_FOUNDRY_AUTH_TOKEN = (az account get-access-token `
 
 Trade-off: you gain a real, owned authorization boundary with app roles and admin consent, and you lose the "just run `az login`" simplicity, because the static token expires in about an hour and Claude Code does not refresh it. For a demo, show the default first and describe this as the production hardening step.
 
+> This refresh problem is specific to exporting a token into an environment variable. Claude **Desktop** avoids it entirely with interactive sign-in, which holds a refresh token and renews silently — see [Scenario C](#scenario-c--gateway-interactive-sign-in-from-claude-desktop).
+
 ### Hop 2 — gateway to Foundry
 
 Selected by `{{backend-auth-mode}}`:
@@ -167,6 +172,103 @@ Switch between them without redeploying:
 ### Verdict
 
 **Fully supported, in two distinct topologies.** Use `managedIdentity` when you want the gateway to be the trust boundary and Foundry to be reachable by exactly one identity. Use `passthrough` when Foundry-side per-user RBAC and audit are a compliance requirement.
+
+## Scenario C — Gateway: interactive sign-in from Claude Desktop
+
+This is the scenario that survives a locked-down tenant. Claude Desktop 1.6889.0+ can act as an OIDC client itself: the user clicks sign in, a browser opens, Entra authenticates them, and the app holds the resulting token and refreshes it silently. Nothing is typed into a settings box, and no secret is stored anywhere.
+
+In **Settings → Developer → Configure Third-Party Inference → Gateway**, set **Credential kind** to **Interactive sign-in** and fill in the **Gateway SSO IdP (OIDC)** block.
+
+### Why it needs its own app registration
+
+Scenarios A and B both end up asking for `user_impersonation` on **Cognitive Services**, an API Microsoft owns. That is the root of the consent problem this repo hit: you cannot pre-authorize an API you do not own, so in a tenant with restricted consent every user lands on *"Need admin approval"* and stops.
+
+Scenario C moves the audience onto an application **you** own:
+
+```
+Claude Desktop ──token for api://<your-app>──▶ API Management ──managed identity──▶ Foundry
+```
+
+The user's token is only ever presented to API Management. API Management then calls Foundry as itself. So the user needs **no Foundry role, no Microsoft first-party scope, and no consent**.
+
+Create it with:
+
+```powershell
+./scripts/New-GatewaySsoAppRegistration.ps1 -AllowedGroup 'Claude Gateway Users'
+```
+
+### Pre-authorization is what removes the consent prompt
+
+The registration lists itself in `preAuthorizedApplications` for its own `Gateway.Access` scope. Microsoft's documentation is explicit about the effect: users of a pre-authorized client *"won't be prompted for their consent when signing in to it."* Not deferred to an admin — **not raised at all**.
+
+This is not merely a convenience in a restricted tenant, it is load-bearing. A tenant on the `microsoft-user-default-low` consent policy allows user consent only for *"apps that are registered in your tenant, and only for permissions that you classify as low impact"*. A custom scope carries no classification, so plain user consent would still fail. Pre-authorization bypasses the consent framework entirely.
+
+### The exact settings
+
+| Field | Value |
+| --- | --- |
+| Credential kind | `Interactive sign-in` |
+| Client ID | the app ID from the script |
+| Issuer URL | `https://login.microsoftonline.com/<tenant-id>/v2.0` |
+| Bearer token | **Access token** |
+| Scopes | `openid profile email api://<app-id>/Gateway.Access` |
+| Redirect port | *(leave empty)* |
+
+**Bearer token must be Access token, not ID token.** An ID token's `aud` is the client ID and it is meant for the client, not for an API; API Management validates an access token's audience and scope. Choosing access token also makes Claude append `offline_access` automatically, which is what gives you silent refresh instead of a dead session after an hour.
+
+The redirect URI is registered as exactly `http://127.0.0.1/callback` under **Mobile and desktop applications**. Entra wildcards the **port** of a loopback URI but not the path, which is why the port box is left empty and why the path cannot be dropped — omitting it fails at sign-in with `AADSTS50011`.
+
+`-AuthFlow broker` swaps the browser for WAM on Windows or the Company Portal on macOS. It needs no loopback listener and it satisfies Conditional Access policies that demand a compliant device. Not available on Linux.
+
+### Deciding who is allowed in
+
+Authentication says who the caller is. It does not say whether they may use the gateway. That decision is made from the **`groups` claim**, at the gateway:
+
+```xml
+<set-variable name="groupAuthz" value="@{ ... }" />
+```
+
+`New-GatewaySsoAppRegistration.ps1 -AllowedGroup <name>` assigns the group to the enterprise application, and `deploy.ps1 -AllowedGroupId <object-id>` tells the gateway which group IDs to accept. Omit the group entirely and any authenticated user in the tenant is allowed.
+
+**Why the group claim uses `ApplicationGroup` and not `SecurityGroup`.** A JWT can carry at most **200** group IDs. Past that, Entra drops the `groups` claim and substitutes `_claim_names` / `_claim_sources`, expecting the API to call Graph for the real list. A large enterprise directory blows through 200 easily — in the Microsoft tenant this was verified against a real user — so a `SecurityGroup` claim would simply be absent and the gateway would deny everyone. `ApplicationGroup` emits **only groups assigned to this application**, which in practice is one or two, so the ceiling is never approached. The policy still treats `_claim_names` as a denial, because a claim it cannot read is not a claim it can trust.
+
+### Why "Assignment required" is deliberately left off
+
+The obvious alternative — set **Assignment required = Yes** on the enterprise application so unassigned users cannot sign in at all — is incompatible with the goal. Microsoft's guidance states it plainly: *"Applications that require users to be assigned to the application must have their permissions consented by an administrator, even if the user consent policies would otherwise allow it."* Turning it on trades away the entire no-admin-consent property.
+
+Enforcing at the gateway instead has two consequences worth stating to a customer up front:
+
+- An unauthorized user **signs in successfully** and is then refused by the gateway with `403`. There is no sign-in-time block.
+- Removing someone from the group takes effect when their **token next expires** (about an hour), not instantly.
+
+If instant, sign-in-time enforcement is required, the production hardening step is **Conditional Access** targeting this application — which blocks at the token endpoint, supports device compliance and MFA, and does not reintroduce a consent requirement. It needs Entra ID P1.
+
+### Verified against the live deployment
+
+| Check | Result |
+| --- | --- |
+| Token minted for `api://<app>/Gateway.Access` with no consent grant | ✅ issued |
+| `aud` | bare app ID GUID (`requestedAccessTokenVersion: 2`) |
+| `scp` | `Gateway.Access` |
+| `groups` before assigning a group | absent |
+| `groups` after assigning one group | exactly that one ID |
+| `_claim_names` overage for a user in a very large directory | **absent** — `ApplicationGroup` works |
+| Group member calls `/v1/messages` | `200`, model replied |
+| Non-member calls `/v1/messages` | `403`, `x-gateway-error: GroupNotAuthorized`, `x-gateway-authz-reason: not-member` |
+| Existing Cognitive Services token (Scenario B) still accepted | `200` — no regression |
+| Existing subscription-key path still accepted | `200` — no regression |
+| `openid profile email api://<app>/Gateway.Access` accepted as a public client | ✅ device-code initiation succeeded |
+
+The 403 body is shaped like an Anthropic error so the client renders it:
+
+```json
+{ "type": "error", "error": { "type": "permission_error",
+  "message": "Forbidden. Your account is not a member of a group approved to use this AI gateway. Contact your administrator to request access." } }
+```
+
+### Verdict
+
+**Supported, and the best option for a tenant that will not grant admin consent.** No secret on the client, no Foundry permission for the user, no consent prompt, silent refresh, and group-based authorization enforced at the edge. Add Conditional Access when sign-in-time enforcement is required.
 
 ## The app registration — delegated access to Foundry
 
@@ -270,7 +372,7 @@ az rest --method GET `
 
 > **Need admin approval** — *Claude Desktop - Microsoft Foundry needs permission to access resources in your organisation that only an admin can grant.*
 
-There are three ways out.
+There are four ways out.
 
 **1. Admin consent — one action, tenant-wide.** The usual answer:
 
@@ -302,6 +404,8 @@ az rest --method POST `
 This still needs a directory admin, but it is a narrower and more reviewable change than granting the whole app tenant-wide.
 
 **3. Use keys.** No registration, no consent, no directory admin — see the [key-based scenario](03-claude-code-direct.md#key-based-access-no-entra-app-required).
+
+**4. Stop asking for a Microsoft-owned scope.** The consent wall exists because `user_impersonation` belongs to Cognitive Services, an API you do not own and therefore cannot pre-authorize. Point Claude Desktop at a scope on an application **you** own and the problem disappears: pre-authorization suppresses the prompt entirely, for admins and users alike, and the gateway reaches Foundry with its own managed identity so the user needs no Foundry permission at all. This is [Scenario C](#scenario-c--gateway-interactive-sign-in-from-claude-desktop), and unlike options 1 and 2 it needs **no directory administrator whatsoever**.
 
 Check whether consent has already been granted:
 

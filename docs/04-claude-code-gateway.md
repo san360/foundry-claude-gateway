@@ -347,6 +347,33 @@ Accepting a second audience is safe **only under `backendAuthMode = 'managedIden
 
 Also remember `subscriptionRequired` must be off whenever Entra is a permitted client credential — APIM rejects the request on the missing key before your policy ever runs.
 
+### The better option: a dedicated sign-in app
+
+Everything above works, but it inherits the consent problem, because `https://cognitiveservices.azure.com` is still an API **Microsoft** owns. You cannot pre-authorize someone else's API, so a tenant with restricted user consent stops every user at *"Need admin approval"*.
+
+Registering an application whose only job is to be an audience removes that constraint entirely:
+
+```powershell
+./scripts/New-GatewaySsoAppRegistration.ps1 -AllowedGroup 'Claude Gateway Users'
+./scripts/deploy.ps1 -GatewaySsoAppId <app-id> -AllowedGroupId <group-object-id>
+./scripts/New-ClaudeConfig.ps1 -Mode Gateway -GatewaySsoClientId <app-id> -Apply
+```
+
+The OIDC block then points at your own scope:
+
+```json
+{
+  "issuer": "https://login.microsoftonline.com/<tenant-id>/v2.0",
+  "clientId": "<gateway-sso-app-id>",
+  "tokenType": "access_token",
+  "scopes": ["openid", "profile", "email", "api://<gateway-sso-app-id>/Gateway.Access"]
+}
+```
+
+Because the client is pre-authorized for that scope, **no consent prompt is raised at all** — not for the user, not for an admin. The user also needs no Foundry role, because the gateway still calls Foundry with its own managed identity. Who is allowed in is decided separately from the `groups` claim, at the gateway.
+
+Full walkthrough, including the group-claim design and why "Assignment required" is deliberately left off: [05 — Scenario C](05-entra-authentication.md#scenario-c--gateway-interactive-sign-in-from-claude-desktop).
+
 ### Key-based access at the gateway
 
 The gateway's key scenario uses an **API Management subscription key**, not the Foundry key. The gateway keeps its own managed-identity credential to Foundry, so the caller never holds a Foundry secret — which is one of the better arguments for putting a gateway in front of the model in the first place.

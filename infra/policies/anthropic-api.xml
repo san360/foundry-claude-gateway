@@ -12,6 +12,8 @@
     {{backend-auth-mode}}       managedIdentity | passthrough
     {{entra-tenant-id}}         tenant used to validate inbound Entra tokens
     {{entra-audience}}          expected "aud" claim on inbound Entra tokens
+    {{gateway-sso-audience}}    "aud" for Claude Desktop interactive sign-in
+    {{gateway-allowed-groups}}  group object IDs allowed to use the gateway
     {{foundry-token-resource}}  resource the gateway managed identity requests
     {{foundry-deployments-uri}} ARM deployments collection, read for discovery
     {{content-safety-endpoint}} Azure AI Content Safety base URL for guardrails
@@ -68,8 +70,100 @@
           <audiences>
             <audience>{{entra-audience}}</audience>
             <audience>{{entra-audience-alt}}</audience>
+            <!--
+              Audiences for the gateway interactive sign-in app. Claude Desktop's
+              "Interactive sign-in" credential kind signs the user in against a
+              customer-owned registration and sends that app's access token, so
+              the gateway is the token's real audience. Both forms are listed
+              because the shape depends on requestedAccessTokenVersion: v2 tokens
+              carry the bare application ID GUID, v1 tokens carry api://{guid}.
+            -->
+            <audience>{{gateway-sso-audience}}</audience>
+            <audience>{{gateway-sso-audience-alt}}</audience>
           </audiences>
         </validate-azure-ad-token>
+      </otherwise>
+    </choose>
+
+    <!--
+      STEP 1b - Group authorization for interactive sign-in.
+
+      Authentication proves who the caller is; it does not decide whether they
+      are allowed to use the gateway. That decision is made here, from the
+      'groups' claim, because the alternative - switching the app registration to
+      "Assignment required" - would force an administrator to consent to the app.
+      Microsoft's guidance is explicit that assignment-required applications
+      "must have their permissions consented by an administrator", which is
+      precisely the constraint this scenario exists to avoid.
+
+      The consequence is worth stating plainly: an unauthorized user still signs
+      in successfully and is refused here with 403. Sign-in itself is only
+      blocked by assignment-required or Conditional Access.
+
+      The check is deliberately narrow. It runs only for tokens whose audience is
+      the gateway sign-in app, so subscription-key callers and the existing
+      Cognitive Services token flow are untouched - those tokens come from a
+      different resource application and never carry a 'groups' claim.
+    -->
+    <set-variable name="groupAuthz" value="@{
+        if (!context.Variables.ContainsKey(&quot;callerToken&quot;))
+        {
+            return &quot;skip&quot;;
+        }
+
+        var allowedRaw = &quot;{{gateway-allowed-groups}}&quot;;
+        if (string.IsNullOrWhiteSpace(allowedRaw) || allowedRaw == &quot;disabled&quot;)
+        {
+            return &quot;skip&quot;;
+        }
+
+        var jwt = (Jwt)context.Variables[&quot;callerToken&quot;];
+        var audience = jwt.Claims.ContainsKey(&quot;aud&quot;) ? jwt.Claims[&quot;aud&quot;].FirstOrDefault() : &quot;&quot;;
+        var ssoAudience = &quot;{{gateway-sso-audience}}&quot;;
+        if (audience != ssoAudience &amp;&amp; audience != &quot;{{gateway-sso-audience-alt}}&quot;)
+        {
+            return &quot;skip&quot;;
+        }
+
+        // Entra drops the 'groups' claim entirely and substitutes '_claim_names'
+        // once a caller belongs to more than 200 groups. The app requests
+        // ApplicationGroup precisely so only groups assigned to it are emitted
+        // and the ceiling is never approached, but if it ever happens the claim
+        // is unreadable here and the only safe answer is to refuse.
+        if (jwt.Claims.ContainsKey(&quot;_claim_names&quot;))
+        {
+            return &quot;overage&quot;;
+        }
+
+        if (!jwt.Claims.ContainsKey(&quot;groups&quot;))
+        {
+            return &quot;no-groups&quot;;
+        }
+
+        var held = jwt.Claims[&quot;groups&quot;];
+        var allowed = allowedRaw.Split(',').Select(g =&gt; g.Trim()).Where(g =&gt; g.Length &gt; 0);
+        return allowed.Any(a =&gt; held.Contains(a)) ? &quot;allow&quot; : &quot;not-member&quot;;
+    }" />
+
+    <choose>
+      <when condition="@(((string)context.Variables[&quot;groupAuthz&quot;]) == &quot;skip&quot; || ((string)context.Variables[&quot;groupAuthz&quot;]) == &quot;allow&quot;)">
+        <!-- Authorized, or not subject to the group check. -->
+      </when>
+      <otherwise>
+        <return-response>
+          <set-status code="403" reason="Forbidden" />
+          <set-header name="Content-Type" exists-action="override">
+            <value>application/json</value>
+          </set-header>
+          <set-header name="x-gateway-error" exists-action="override">
+            <value>GroupNotAuthorized</value>
+          </set-header>
+          <!-- Which of the three refusal reasons fired, for support triage. -->
+          <set-header name="x-gateway-authz-reason" exists-action="override">
+            <value>@((string)context.Variables["groupAuthz"])</value>
+          </set-header>
+          <set-body>{ "type": "error", "error": { "type": "permission_error", "message": "Forbidden. Your account is not a member of a group approved to use this AI gateway. Contact your administrator to request access." } }</set-body>
+        </return-response>
       </otherwise>
     </choose>
 

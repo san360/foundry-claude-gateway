@@ -16,6 +16,15 @@
 .PARAMETER SubscriptionId
     Optional subscription to deploy into. Defaults to the current az context.
 
+.PARAMETER GatewaySsoAppId
+    Client ID of the Claude Desktop interactive sign-in app registration, from
+    scripts/New-GatewaySsoAppRegistration.ps1. Adds that app as an accepted
+    audience at the gateway.
+
+.PARAMETER AllowedGroupId
+    Object IDs of Entra groups permitted to call the gateway with an interactive
+    sign-in token. Omit to accept any authenticated user. Repeatable.
+
 .PARAMETER GrantSelfAccess
     Look up the signed-in user's object ID and pass it as principalId so the
     Entra ID path works immediately after deployment.
@@ -34,6 +43,8 @@ param(
     [string]$Location = 'eastus2',
     [string]$ParameterFile,
     [string]$SubscriptionId,
+    [string]$GatewaySsoAppId,
+    [string[]]$AllowedGroupId = @(),
     [switch]$GrantSelfAccess,
     [switch]$WhatIf
 )
@@ -76,6 +87,19 @@ if ($GrantSelfAccess) {
         Write-Host "Principal    : $objectId (Cognitive Services User)" -ForegroundColor Cyan
         $extraParams += @("principalId=$objectId", 'principalType=User')
     }
+}
+
+if ($GatewaySsoAppId) {
+    Write-Host "Gateway SSO  : $GatewaySsoAppId" -ForegroundColor Cyan
+    $extraParams += "gatewaySsoAppId=$GatewaySsoAppId"
+}
+
+if ($AllowedGroupId.Count) {
+    Write-Host "Allowed group: $($AllowedGroupId -join ', ')" -ForegroundColor Cyan
+    # Comma-separated rather than a JSON array: an inline array override has to
+    # arrive as JSON, and the Azure CLI's own argument parsing strips the inner
+    # double quotes on Windows, so it never survives to ARM.
+    $extraParams += "gatewayAllowedGroupIds=$($AllowedGroupId -join ',')"
 }
 
 $deploymentName = "claude-foundry-$(Get-Date -Format 'yyyyMMddHHmmss')"

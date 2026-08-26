@@ -147,6 +147,12 @@ param gatewayEntraAudience string = 'https://ai.azure.com'
 @description('Second accepted audience at the gateway. Claude Desktop signs in with a customer-owned app registration, which can only obtain a Cognitive Services token; accepting both lets the CLI and the desktop app share one gateway.')
 param gatewayEntraAudienceAdditional string = 'https://cognitiveservices.azure.com'
 
+@description('Application (client) ID of the Claude Desktop interactive sign-in app registration, created by scripts/New-GatewaySsoAppRegistration.ps1. Tokens for this app are accepted as an additional gateway audience. Leave empty to keep the scenario switched off.')
+param gatewaySsoAppId string = ''
+
+@description('Comma-separated object IDs of Entra security groups allowed to call the gateway with an interactive sign-in token. Leave empty to accept any authenticated user. Enforced at the gateway rather than via "Assignment required", which would force admin consent.')
+param gatewayAllowedGroupIds string = ''
+
 @description('Resource the gateway managed identity requests a token for when calling Foundry.')
 param foundryTokenResource string = 'https://ai.azure.com'
 
@@ -360,6 +366,8 @@ module gatewayApi 'modules/apim-anthropic-api.bicep' = if (deployGateway) {
     backendAuthMode: gatewayBackendAuthMode
     entraAudience: gatewayEntraAudience
     entraAudienceAdditional: gatewayEntraAudienceAdditional
+    gatewaySsoAppId: gatewaySsoAppId
+    gatewayAllowedGroupIds: gatewayAllowedGroupIds
     foundryTokenResource: foundryTokenResource
     enableModelDiscovery: gatewayModelDiscovery
     foundryAccountResourceId: foundry.outputs.accountId
@@ -424,7 +432,7 @@ output gatewaySubscriptionName string = deployGateway ? gatewayApi!.outputs.demo
 output gatewaySubscriptionKeyHeader string = deployGateway ? gatewayApi!.outputs.subscriptionKeyHeader : ''
 
 @description('Audiences the gateway accepts on inbound Entra tokens. Clients must request a token for one of these.')
-output gatewayEntraAudiences array = deployGateway ? [gatewayEntraAudience, gatewayEntraAudienceAdditional] : []
+output gatewayEntraAudiences array = deployGateway ? (empty(gatewaySsoAppId) ? [gatewayEntraAudience, gatewayEntraAudienceAdditional] : [gatewayEntraAudience, gatewayEntraAudienceAdditional, gatewaySsoAppId, 'api://${gatewaySsoAppId}']) : []
 
 @description('Deployment name to set as ANTHROPIC_DEFAULT_HAIKU_MODEL.')
 output haikuDeploymentName string = foundry.outputs.haikuDeploymentName

@@ -56,6 +56,37 @@ and signature.
 ''')
 param entraAudienceAdditional string = 'https://cognitiveservices.azure.com'
 
+@description('''
+Application (client) ID of the app registration backing Claude Desktop's
+"Interactive sign-in" credential kind, created by
+scripts/New-GatewaySsoAppRegistration.ps1. Tokens minted for this app are
+accepted as an additional audience.
+
+This is the audience that makes the gateway path work in a tenant with
+restricted consent. The direct path has to request a scope on Microsoft's
+Cognitive Services API, which you do not own and therefore cannot pre-authorize,
+so a locked-down tenant stops every user at "Need admin approval". Here the token
+is only ever presented to API Management, and the gateway calls Foundry with its
+own managed identity - so the user needs no Foundry permission at all.
+
+Leave empty to keep the scenario switched off.
+''')
+param gatewaySsoAppId string = ''
+
+@description('''
+Comma-separated object IDs of the Entra security groups allowed to call the
+gateway with an interactive sign-in token. Leave empty to accept any
+authenticated user.
+
+Authorization is enforced here rather than by turning on "Assignment required" on
+the app registration, because assignment-required applications must have their
+permissions consented by an administrator - which would defeat the entire point
+of this scenario. The trade-off is that an unauthorized user signs in
+successfully and is refused by the gateway with 403, and that removing someone
+from the group takes effect when their token next expires rather than instantly.
+''')
+param gatewayAllowedGroupIds string = ''
+
 @description('Resource the gateway managed identity requests a token for when calling Foundry.')
 param foundryTokenResource string = 'https://ai.azure.com'
 
@@ -264,6 +295,41 @@ resource nvEntraAudienceAlt 'Microsoft.ApiManagement/service/namedValues@2024-05
   properties: {
     displayName: 'entra-audience-alt'
     value: entraAudienceAdditional
+    secret: false
+  }
+}
+
+resource nvGatewaySsoAudience 'Microsoft.ApiManagement/service/namedValues@2024-05-01' = {
+  parent: apim
+  name: 'gateway-sso-audience'
+  properties: {
+    displayName: 'gateway-sso-audience'
+    // Sentinel rather than an empty string: an empty <audience> element makes
+    // validate-azure-ad-token reject every token. A value that cannot be a real
+    // audience simply never matches, so the scenario is inert until configured.
+    value: empty(gatewaySsoAppId) ? 'gateway-sso-not-configured' : gatewaySsoAppId
+    secret: false
+  }
+}
+
+resource nvGatewaySsoAudienceAlt 'Microsoft.ApiManagement/service/namedValues@2024-05-01' = {
+  parent: apim
+  name: 'gateway-sso-audience-alt'
+  properties: {
+    displayName: 'gateway-sso-audience-alt'
+    value: empty(gatewaySsoAppId) ? 'api://gateway-sso-not-configured' : 'api://${gatewaySsoAppId}'
+    secret: false
+  }
+}
+
+resource nvGatewayAllowedGroups 'Microsoft.ApiManagement/service/namedValues@2024-05-01' = {
+  parent: apim
+  name: 'gateway-allowed-groups'
+  properties: {
+    displayName: 'gateway-allowed-groups'
+    // 'disabled' turns the group check off entirely, which is the right default:
+    // an empty allow-list that is enforced would lock everyone out.
+    value: empty(gatewayAllowedGroupIds) ? 'disabled' : gatewayAllowedGroupIds
     secret: false
   }
 }
