@@ -220,6 +220,44 @@ The redirect URI is registered as exactly `http://127.0.0.1/callback` under **Mo
 
 `-AuthFlow broker` swaps the browser for WAM on Windows or the Company Portal on macOS. It needs no loopback listener and it satisfies Conditional Access policies that demand a compliant device. Not available on Linux.
 
+### Where these values are recorded
+
+Nothing above has to be typed into the settings pane by hand. `New-ClaudeConfig.ps1` writes them into `.env`, and `Set-ClaudeDesktopConfig.ps1` translates that into the store Claude Desktop actually reads:
+
+```powershell
+./scripts/New-ClaudeConfig.ps1 -Mode Gateway -CredentialKind interactive `
+    -GatewaySsoClientId <app-id>
+./scripts/Set-ClaudeDesktopConfig.ps1 -ProfileName 'Foundry Gateway SSO'
+```
+
+Claude Desktop reads its configuration **once, at launch**, so quit it completely — system tray included — and reopen it.
+
+The five fields in the table above travel as a single setting, `inferenceGatewayOidc`, holding a JSON object rather than dotted sub-keys:
+
+```json
+{
+  "issuer":    "https://login.microsoftonline.com/<tenant-id>/v2.0",
+  "clientId":  "<app-id>",
+  "tokenType": "access_token",
+  "scopes":    ["openid", "profile", "email", "api://<app-id>/Gateway.Access"]
+}
+```
+
+Alongside it, `.env` records the identifiers themselves so the registration and its allow-list can be found again without hunting through the portal. These are informational — no client reads them:
+
+| Key | Meaning |
+| --- | --- |
+| `GATEWAY_SSO_TENANT_ID` | Directory the app registration lives in |
+| `GATEWAY_SSO_CLIENT_ID` | The sign-in app registration. **Not** the Foundry app registration |
+| `GATEWAY_SSO_SCOPE` | `api://<app-id>/Gateway.Access` |
+| `GATEWAY_SSO_ISSUER` | v2 issuer, matching `requestedAccessTokenVersion: 2` |
+| `GATEWAY_SSO_ALLOWED_GROUP_ID` | Group object IDs the gateway accepts |
+| `GATEWAY_SSO_ALLOWED_GROUP_NAME` | Display names, for humans only |
+
+The allow-list is read back from the deployed `gateway-allowed-groups` named value rather than restated from a parameter, so `.env` describes what is actually enforcing the `403`. Pass `-AllowedGroupId` to override.
+
+Applying does not discard the key-based profile: the previous configuration stays in the library under its own name, so switching between the key demo and the sign-in demo is a profile change in the UI rather than a regeneration.
+
 ### Deciding who is allowed in
 
 Authentication says who the caller is. It does not say whether they may use the gateway. That decision is made from the **`groups` claim**, at the gateway:

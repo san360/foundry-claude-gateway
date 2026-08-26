@@ -92,6 +92,12 @@
     user never needs any permission on Foundry because the gateway calls Foundry
     with its own managed identity.
 
+.PARAMETER AllowedGroupId
+    Entra group object IDs, comma-separated, recorded in .env as the gateway's
+    allow-list. Optional: when omitted the deployed value is read back from the
+    gateway-allowed-groups APIM named value, so .env describes what is actually
+    enforcing rather than what was last typed on a command line.
+
 .EXAMPLE
     ./scripts/New-ClaudeConfig.ps1 -Mode Direct -CreateAppRegistration -Apply
 
@@ -125,6 +131,8 @@ param(
     [string]$GatewaySsoClientId,
 
     [string]$GatewaySsoScope = 'Gateway.Access',
+
+    [string]$AllowedGroupId,
 
     [string]$UserContentRendererUrl,
 
@@ -189,6 +197,39 @@ if ($Mode -eq 'Gateway') {
 }
 else {
     $baseUrl = $o.foundryAnthropicBaseUrl
+}
+
+# --- gateway sign-in identifiers ------------------------------------------
+
+# The allow-list lives in an APIM named value, which is the thing that actually
+# decides the 403, so read it back rather than restating it from a parameter.
+# .env then describes what is deployed instead of what someone last typed.
+$allowedGroups = @()
+if ($GatewaySsoClientId -and $o.apimName) {
+    if ($AllowedGroupId) {
+        $allowedGroups = @($AllowedGroupId -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    }
+    else {
+        $nvUrl = "https://management.azure.com/subscriptions/$subscriptionId" +
+                 "/resourceGroups/$($o.resourceGroupName)/providers/Microsoft.ApiManagement" +
+                 "/service/$($o.apimName)/namedValues/gateway-allowed-groups?api-version=2024-05-01"
+        $nvRaw = az rest --method get --url $nvUrl -o json 2>$null
+        if ($LASTEXITCODE -eq 0 -and $nvRaw) {
+            $nvValue = ($nvRaw | ConvertFrom-Json).properties.value
+            # 'disabled' is the sentinel the Bicep writes when no group is set,
+            # so the policy is inert rather than locking everyone out.
+            if ($nvValue -and $nvValue -ne 'disabled') {
+                $allowedGroups = @($nvValue -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+            }
+        }
+    }
+}
+
+# Display names are a convenience, never a dependency: a caller without
+# directory read access still gets the IDs, which are what the policy compares.
+$allowedGroupNames = foreach ($g in $allowedGroups) {
+    $n = az ad group show --group $g --query displayName -o tsv 2>$null
+    if ($LASTEXITCODE -eq 0 -and $n) { $n } else { '(name unavailable)' }
 }
 
 # --- static credentials ---------------------------------------------------
@@ -327,6 +368,27 @@ Add-Setting 'FOUNDRY_ACCOUNT_NAME' $o.foundryAccountName
 Add-Setting 'FOUNDRY_ANTHROPIC_BASE_URL' $o.foundryAnthropicBaseUrl
 if ($o.gatewayAnthropicBaseUrl) { Add-Setting 'GATEWAY_ANTHROPIC_BASE_URL' $o.gatewayAnthropicBaseUrl }
 if ($ClientId) { Add-Setting 'ENTRA_APP_CLIENT_ID' $ClientId }
+if ($GatewaySsoClientId) {
+    Add-Line ''
+    Add-Line '# Gateway interactive sign-in. Recorded here so the registration and its'
+    Add-Line '# allow-list can be found again without hunting through the portal; the'
+    Add-Line '# values Claude Desktop actually reads are in inferenceGatewayOidc below.'
+    Add-Setting 'GATEWAY_SSO_TENANT_ID' $TenantId
+    Add-Setting 'GATEWAY_SSO_CLIENT_ID' $GatewaySsoClientId
+    Add-Setting 'GATEWAY_SSO_SCOPE' "api://$GatewaySsoClientId/$GatewaySsoScope"
+    Add-Setting 'GATEWAY_SSO_ISSUER' "https://login.microsoftonline.com/$TenantId/v2.0"
+    if ($allowedGroups) {
+        Add-Line '# Membership of these groups is what the gateway checks. Everyone in the'
+        Add-Line '# tenant can sign in; only members get past the groups-claim check.'
+        Add-Setting 'GATEWAY_SSO_ALLOWED_GROUP_ID' ($allowedGroups -join ',')
+        Add-Setting 'GATEWAY_SSO_ALLOWED_GROUP_NAME' ($allowedGroupNames -join ',')
+    }
+    else {
+        Add-Line '# No group allow-list is deployed, so the group check is inert and any'
+        Add-Line '# signed-in user is accepted. Set one with deploy.ps1 -AllowedGroupId.'
+        Add-Setting 'GATEWAY_SSO_ALLOWED_GROUP_ID' ''
+    }
+}
 Add-Line ''
 
 Add-Line '# ---------------------------------------------------------------------'
@@ -555,6 +617,13 @@ Write-Host ('{0,-20} {1}' -f 'Credential:', $CredentialKind)
 Write-Host ('{0,-20} {1}' -f 'Sign-in flow:', $AuthFlow)
 Write-Host ('{0,-20} {1}' -f 'Tenant ID:', $TenantId)
 Write-Host ('{0,-20} {1}' -f 'Client ID:', $(if ($ClientId) { $ClientId } else { '(none - static credential)' }))
+if ($GatewaySsoClientId) {
+    Write-Host ('{0,-20} {1}' -f 'Gateway SSO app:', $GatewaySsoClientId)
+    Write-Host ('{0,-20} {1}' -f 'Gateway SSO scope:', "api://$GatewaySsoClientId/$GatewaySsoScope")
+    Write-Host ('{0,-20} {1}' -f 'Allowed groups:', $(
+        if ($allowedGroups) { ($allowedGroups -join ', ') + ' (' + ($allowedGroupNames -join ', ') + ')' }
+        else { '(none deployed - group check inert)' }))
+}
 Write-Host ('{0,-20} {1}' -f 'Models:', ($models -join ', '))
 Write-Host ('{0,-20} {1}' -f 'Foundry key:', $(if ($foundryKey) { 'written' } else { 'not written' }))
 Write-Host ('{0,-20} {1}' -f 'Gateway key:', $(if ($gatewayKey) { 'written' } else { 'not written' }))

@@ -111,7 +111,11 @@ claude
 #     Access is then decided from the Entra groups claim, at the gateway.
 $sso = ./scripts/New-GatewaySsoAppRegistration.ps1 -AllowedGroup 'Claude Gateway Users'
 ./scripts/deploy.ps1 -GatewaySsoAppId $sso.clientId -AllowedGroupId $sso.allowedGroups
-./scripts/New-ClaudeConfig.ps1 -Mode Gateway -GatewaySsoClientId $sso.clientId -Apply
+./scripts/New-ClaudeConfig.ps1 -Mode Gateway -CredentialKind interactive `
+    -GatewaySsoClientId $sso.clientId -Apply
+#     Claude Desktop reads its configuration once, at launch - quit it
+#     completely, tray included, and reopen. The previous key-based profile
+#     stays in the library, so switching demos is a profile change in the UI.
 
 # 5. Prove the guardrails. Fires 9 probe prompts down both paths and reports
 #    who stopped each one. The gateway blocks all six attacks; the direct
@@ -232,6 +236,9 @@ on 2026-08-21 (`eastus2`, API Management `BasicV2`, Foundry with `claude-haiku-4
 | Scenario C — non-member calls `/v1/messages` via gateway | `403` + `x-gateway-error: GroupNotAuthorized`, `x-gateway-authz-reason: not-member` |
 | Scenario C — existing Entra and subscription-key paths after the change | `200` on both — no regression |
 | Scenario C — `inferenceGatewayOidc` round-trip `.env` → registry/plist/JSON | decodes back to valid JSON in all three exports |
+| Scenario C — applied to Claude Desktop's local config library | profile written and marked active; the key-based profile is kept alongside it |
+| Scenario C — model discovery `GET /v1/models` with an SSO token | `200`, both deployments — discovery survives the group check |
+| Scenario C — allow-list read back from the deployed named value into `.env` | resolved to the group ID **and** its display name |
 
 Five findings from that exercise are worth reading before you present this:
 
