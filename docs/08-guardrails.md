@@ -565,6 +565,37 @@ probe twice and none of the three benign controls. Re-run after editing:
 
 Propagation is eventually consistent — allow a few seconds before testing.
 
+### Why it does not appear in the Foundry portal
+
+The Foundry portal's **Guardrails → Blocklists** tab will not show
+`claude-demo-selfharm`. That is expected. The account carries **two unrelated
+blocklist systems**, and they share nothing but a name:
+
+| | RAI blocklist | Content Safety blocklist |
+| --- | --- | --- |
+| Resource | `Microsoft.CognitiveServices/accounts/raiBlocklists` | `/contentsafety/text/blocklists` |
+| Plane | ARM control plane | Data plane |
+| Attached to | An RAI policy, e.g. `claude-strict` | Nothing — referenced per call |
+| Enforced by | The Azure OpenAI platform content filter | Whoever calls `text:analyze` — here, APIM |
+| Shown in the portal | **Yes**, on the Guardrails tab | **No** |
+| Fires for Anthropic deployments | **No** | **Yes** |
+
+The portal tab lists the first kind. Ours is the second kind, so it is invisible
+there — exactly as blobs are invisible in a storage account's resource view.
+
+The last row is the one that matters. RAI policies are accepted by ARM on
+Anthropic deployments but **never execute** on the `/anthropic/v1/messages`
+surface, which is the whole reason this gateway exists. Putting the terms in an
+`raiBlocklist` would produce a blocklist you can see in the portal and that
+never blocks anything. The Content Safety blocklist, called from APIM, is the
+only one of the two that actually fires for Claude.
+
+Verify it the way the gateway sees it:
+
+```powershell
+./scripts/Set-ContentSafetyBlocklist.ps1 -Verify
+```
+
 ### What this means for the demo
 
 Say it plainly: a blocklist is a blunt instrument and a maintenance burden, and
