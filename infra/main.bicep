@@ -204,6 +204,15 @@ medium and above, 6 blocks only severe content.
 param gatewayGuardrailSeverityThreshold int = 4
 
 @description('''
+Name of an Azure AI Content Safety blocklist to enforce alongside the harm
+categories. Content Safety scores some genuinely harmful prompts 0 in every
+category - first-person self-harm intent is the measured example - so no
+severity threshold can block them. A blocklist is the control that does.
+Provision it with scripts/Set-ContentSafetyBlocklist.ps1. Empty disables it.
+''')
+param gatewayGuardrailBlocklistName string = ''
+
+@description('''
 Deploy a strict custom RAI policy and attach it to the Claude deployments. Kept
 as reproducible evidence: Azure accepts and reports the binding, but does not
 enforce it on the Anthropic surface. See docs/08-guardrails.md.
@@ -389,6 +398,7 @@ module gatewayApi 'modules/apim-anthropic-api.bicep' = if (deployGateway) {
     // only accepts the cognitiveservices.azure.com form of the same account.
     contentSafetyCognitiveEndpoint: foundry.outputs.contentSafetyCognitiveEndpoint
     guardrailSeverityThreshold: gatewayGuardrailSeverityThreshold
+    guardrailBlocklistName: gatewayGuardrailBlocklistName
     enableSemanticCache: gatewaySemanticCache
     embeddingsBackendUrl: foundry.outputs.embeddingsBackendUrl
     semanticCacheScoreThreshold: gatewaySemanticCacheScoreThreshold
@@ -457,6 +467,9 @@ output gatewayGuardrailsEnabled bool = deployGateway ? gatewayApi!.outputs.guard
 
 @description('Harm severity (0-7) at or above which the gateway blocks a prompt.')
 output gatewayGuardrailSeverityThreshold int = deployGateway ? gatewayApi!.outputs.guardrailSeverityThreshold : 0
+
+@description('Content Safety blocklist enforced by the gateway policy, or empty when none is configured.')
+output gatewayGuardrailBlocklistName string = deployGateway ? gatewayApi!.outputs.guardrailBlocklistName : ''
 
 @description('Whether the gateway semantic cache is deployed and wired into the policy.')
 output gatewaySemanticCacheEnabled bool = deployGateway && gatewaySemanticCache

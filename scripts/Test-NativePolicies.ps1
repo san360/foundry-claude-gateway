@@ -86,15 +86,28 @@ function Get-Header {
     try {
         $h = $Response.Headers
         if ($null -eq $h) { return $null }
-        # Windows PowerShell 5.1 hands back a plain Dictionary[string,string];
-        # PowerShell 7 uses HttpHeaders, and error responses a WebHeaderCollection.
+
+        # Error responses on 5.1 carry a WebHeaderCollection.
         if ($h -is [System.Net.WebHeaderCollection]) { return $h[$Name] }
-        if ($h -is [System.Collections.Generic.Dictionary[string, string]]) {
-            foreach ($k in $h.Keys) { if ($k -ieq $Name) { return $h[$k] } }
+
+        # PowerShell 7 exposes HttpHeaders, which is keyed but needs TryGetValues.
+        if ($h.PSObject.Methods.Name -contains 'TryGetValues') {
+            $v = $null
+            if ($h.TryGetValues($Name, [ref]$v)) { return ($v -join ',') }
             return $null
         }
-        $v = $null
-        if ($h.TryGetValues($Name, [ref]$v)) { return ($v -join ',') }
+
+        # Windows PowerShell 5.1 with -UseBasicParsing hands back
+        # Dictionary[string,string[]], so the value is an array, not a string.
+        # Matching on the closed Dictionary[string,string] type misses it and
+        # silently blanks every custom header, so match on shape instead.
+        foreach ($k in $h.Keys) {
+            if ($k -ieq $Name) {
+                $val = $h[$k]
+                if ($val -is [array]) { return ($val -join ',') }
+                return $val
+            }
+        }
     }
     catch { return $null }
     return $null

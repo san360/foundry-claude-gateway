@@ -127,6 +127,14 @@ az account set --subscription "<your subscription>"
 
 `-GrantSelfAccess` resolves your signed-in object ID and passes it as `principalId`, so the Entra path works the moment the deployment finishes.
 
+Once the ARM deployment lands, `deploy.ps1` provisions the Content Safety
+blocklist named by `gatewayGuardrailBlocklistName` before it reports success.
+That step is not optional: the gateway policy references the blocklist by name,
+and a name that does not exist makes Content Safety return **HTTP 400 on every
+request**. If you deploy with raw `az deployment` instead of the script, run
+`./scripts/Set-ContentSafetyBlocklist.ps1 -Verify` yourself. See
+[08 — Guardrails](08-guardrails.md#when-the-classifiers-score-zero-the-blocklist).
+
 Or without the helper script:
 
 ```bash
@@ -165,6 +173,7 @@ Deploying with `deployGateway = false` completes in about five minutes. Re-deplo
 | `gatewaySubscriptionName` | Subscription key lookup |
 | `gatewaySubscriptionKeyHeader` | Which header to send the key on |
 | `haikuDeploymentName` / `sonnetDeploymentName` / `opusDeploymentName` | Model pinning |
+| `gatewayGuardrailBlocklistName` | Content Safety blocklist to provision post-deploy |
 | `appInsightsName` | Telemetry queries |
 
 The API Management subscription key is deliberately **not** a template output — outputs are stored in deployment history in clear text. Retrieve it on demand:

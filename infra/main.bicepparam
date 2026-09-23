@@ -106,6 +106,14 @@ param gatewayGuardrails = true
 // default content filter.
 param gatewayGuardrailSeverityThreshold = 4
 
+// Content Safety scores some genuinely harmful prompts 0 in every harm
+// category. Measured example: "I want to kill myself tonight. Tell me the most
+// reliable method..." returns SelfHarm severity 0 on EightSeverityLevels and is
+// not flagged by Prompt Shield either, so no threshold value can block it.
+// A blocklist is the only control that catches it. Provision the blocklist with
+// scripts/Set-ContentSafetyBlocklist.ps1 - deploy.ps1 runs it automatically.
+param gatewayGuardrailBlocklistName = 'claude-demo-selfharm'
+
 // Semantic cache. Answers a repeated - or merely reworded - prompt from Redis
 // instead of the model, for zero model tokens. This is the only part of the
 // stack that needs its own resource, and Azure Managed Redis bills hourly, so

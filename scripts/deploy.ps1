@@ -143,6 +143,24 @@ foreach ($key in $result.properties.outputs.PSObject.Properties.Name) {
 $outputsPath = Join-Path $repoRoot '.deployment-outputs.json'
 $outputs | ConvertTo-Json -Depth 5 | Set-Content -Path $outputsPath -Encoding utf8
 
+# The guardrail policy references a Content Safety blocklist by name, and
+# Content Safety returns 400 - failing every gateway request - when that name
+# does not exist. Blocklists are data plane, so ARM cannot create them and this
+# has to happen here. Provision before reporting the deployment as ready.
+if ($outputs['gatewayGuardrailBlocklistName']) {
+    Write-Host ''
+    Write-Host 'Provisioning the Content Safety blocklist the policy references.' -ForegroundColor Cyan
+    try {
+        & (Join-Path $PSScriptRoot 'Set-ContentSafetyBlocklist.ps1') `
+            -Endpoint $outputs['contentSafetyEndpoint'] -Verify | Out-Null
+        Write-Host "Blocklist '$($outputs['gatewayGuardrailBlocklistName'])' is ready." -ForegroundColor Green
+    }
+    catch {
+        Write-Warning "The blocklist could not be provisioned: $_"
+        Write-Warning 'Until it exists the gateway returns 500 on every request. Re-run scripts/Set-ContentSafetyBlocklist.ps1.'
+    }
+}
+
 Write-Host ''
 Write-Host 'Deployment complete.' -ForegroundColor Green
 Write-Host "Outputs written to $outputsPath" -ForegroundColor Green

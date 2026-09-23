@@ -404,7 +404,7 @@
                 <category name="SelfHarm" threshold="__GUARDRAIL_SEVERITY_THRESHOLD__" />
                 <category name="Sexual" threshold="__GUARDRAIL_SEVERITY_THRESHOLD__" />
                 <category name="Violence" threshold="__GUARDRAIL_SEVERITY_THRESHOLD__" />
-              </categories>
+              </categories>__GUARDRAIL_BLOCKLISTS__
             </llm-content-safety>
           </when>
         </choose>
@@ -495,7 +495,7 @@
             <category name="SelfHarm" threshold="__GUARDRAIL_SEVERITY_THRESHOLD__" />
             <category name="Sexual" threshold="__GUARDRAIL_SEVERITY_THRESHOLD__" />
             <category name="Violence" threshold="__GUARDRAIL_SEVERITY_THRESHOLD__" />
-          </categories>
+          </categories>__GUARDRAIL_BLOCKLISTS__
         </llm-content-safety>
 
         <!-- Restore the caller's exact payload for the model. -->

@@ -166,9 +166,24 @@ function Get-ResponseHeader {
         $headers = $Response.Headers
         if ($null -eq $headers) { return $null }
         if ($headers -is [System.Net.WebHeaderCollection]) { return $headers[$Name] }
-        $values = $null
-        if ($headers.TryGetValues($Name, [ref]$values)) { return ($values -join ',') }
-        return $headers[$Name]
+
+        # Probe for the method first. Calling TryGetValues on a Dictionary throws,
+        # and the catch below would swallow it and blank the header.
+        if ($headers.PSObject.Methods.Name -contains 'TryGetValues') {
+            $values = $null
+            if ($headers.TryGetValues($Name, [ref]$values)) { return ($values -join ',') }
+            return $null
+        }
+
+        # 5.1 with -UseBasicParsing: Dictionary[string,string[]], case-sensitive keys.
+        foreach ($k in $headers.Keys) {
+            if ($k -ieq $Name) {
+                $v = $headers[$k]
+                if ($v -is [array]) { return ($v -join ',') }
+                return $v
+            }
+        }
+        return $null
     }
     catch { return $null }
 }

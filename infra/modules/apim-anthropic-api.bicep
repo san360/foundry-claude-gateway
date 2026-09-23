@@ -159,6 +159,14 @@ severity. Scores use the EightSeverityLevels scale (0-7), so 2 is permissive,
 @maxValue(7)
 param guardrailSeverityThreshold int = 4
 
+@description('''
+Azure AI Content Safety blocklist applied alongside the harm categories. The
+severity classifiers score some genuinely harmful prompts 0 - first-person
+self-harm intent is the measured example - so no threshold can catch them and a
+blocklist is the only control that does. Empty omits the element entirely.
+''')
+param guardrailBlocklistName string = ''
+
 @description('Bytes of request and response body logged to Application Insights. 0 disables body logging. Maximum 8192.')
 @minValue(0)
 @maxValue(8192)
@@ -235,6 +243,14 @@ var policyXmlWithCache = replace(
   '__CACHE_CLOSE__',
   semanticCacheActive ? '' : '-->'
 )
+
+// <blocklists> is optional and must follow <categories>. Emitting nothing when
+// no blocklist is configured keeps the policy document valid either way.
+var guardrailBlocklistXml = (guardrailsActive && !empty(guardrailBlocklistName))
+  ? '\n              <blocklists>\n                <id>${guardrailBlocklistName}</id>\n              </blocklists>'
+  : ''
+
+var policyXmlFinal = replace(policyXmlWithCache, '__GUARDRAIL_BLOCKLISTS__', guardrailBlocklistXml)
 
 resource apim 'Microsoft.ApiManagement/service@2024-05-01' existing = {
   name: apimName
@@ -516,7 +532,7 @@ resource apiPolicy 'Microsoft.ApiManagement/service/apis/policies@2024-05-01' = 
   name: 'policy'
   properties: {
     format: 'rawxml'
-    value: policyXmlWithCache
+    value: policyXmlFinal
   }
   dependsOn: [
     nvClientAuthMode
@@ -638,3 +654,6 @@ output guardrailsEnabled bool = guardrailsActive
 
 @description('Severity at or above which a harm category blocks the request (EightSeverityLevels, 0-7).')
 output guardrailSeverityThreshold int = guardrailSeverityThreshold
+
+@description('Content Safety blocklist enforced by the policy, or empty when none is configured.')
+output guardrailBlocklistName string = (guardrailsActive && !empty(guardrailBlocklistName)) ? guardrailBlocklistName : ''
