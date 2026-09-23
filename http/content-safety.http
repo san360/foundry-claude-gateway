@@ -11,6 +11,18 @@
 #   2. ./scripts/Set-HttpEnv.ps1
 #   3. Click "Send Request" above any ### block below.
 #
+# CONTENTS
+#   1. text:analyze      harm category scoring          1a  1b  1b-contrast
+#                                                       1c  1d  1e
+#   2. text:shieldPrompt jailbreak / injection          2a  2b  2c
+#   3. blocklists        READ the live config           3a  3b  3c   <-- start here
+#                        create / modify / delete       3d  3e  3f  3g  3h
+#   4. negatives         documented failure modes       4a  4b  4c
+#
+#   To simply see which blocklist is configured and what is in it, run 3a then
+#   3c. They are read-only. Everything from 3d onwards writes to a disposable
+#   "http-scratch" blocklist and never touches the one the gateway uses.
+#
 # {{$dotenv KEY}} resolves against the .env file at the repository root, which
 # is gitignored. CONTENT_SAFETY_TOKEN expires after roughly an hour - re-run
 # Set-HttpEnv.ps1 when a request starts returning 401.
@@ -119,6 +131,11 @@ Content-Type: application/json
 ### Severities are still all 0, but blocklistsMatch is now populated - that is
 ### the signal the policy acts on. haltOnBlocklistHit short-circuits the
 ### category analysis once a term matches, which is marginally cheaper.
+###
+### {{blocklist}} resolves to CONTENT_SAFETY_BLOCKLIST in .env, which is the
+### same name the gateway policy references. To see the blocklist itself and
+### the terms it contains, run 3a and 3c below - this request only reports
+### WHICH term matched, never the full list.
 POST {{endpoint}}/contentsafety/text:analyze?api-version={{apiVersion}}
 Authorization: Bearer {{token}}
 Content-Type: application/json
@@ -209,17 +226,46 @@ Content-Type: application/json
 # tab - that tab lists ARM raiBlocklists, a different system entirely.
 ###############################################################################
 
-### 3a. List every blocklist on the account.
+### 3a. List every blocklist on the account. READ-ONLY.
+###
+### This is the authoritative answer to "what blocklists exist?". On this
+### deployment it returns exactly one:
+###
+###   claude-demo-selfharm - "Self-harm intent phrases. Azure AI Content Safety
+###                           scores these 0 in every harm category, so no
+###                           severity threshold blocks them."
+###
+### An empty list here while the gateway policy names a blocklist is a
+### misconfiguration: every request would fail with 400 (see 4a). Run
+### ./scripts/Set-ContentSafetyBlocklist.ps1 to recreate it.
 GET {{endpoint}}/contentsafety/text/blocklists?api-version={{apiVersion}}
 Authorization: Bearer {{token}}
 
-### 3b. Get one blocklist.
+### 3b. Get one blocklist - name and description only, no terms. READ-ONLY.
+###
+### Expect 404 if the name is wrong. Useful as a quick existence check before
+### deploying a policy that references it.
 GET {{endpoint}}/contentsafety/text/blocklists/{{blocklist}}?api-version={{apiVersion}}
 Authorization: Bearer {{token}}
 
-### 3c. List the terms in it.
+### 3c. List the terms in it. READ-ONLY. This is the one you usually want.
+###
+### Expect the six self-harm phrases, each with a blocklistItemId (needed by
+### 3g) and isRegex false:
+###
+###   how to kill myself / kill myself / commit suicide
+###   end my life / end my own life / take my own life
+###
+### Terms are matched case-insensitively as SUBSTRINGS, which is why they are
+### phrases rather than single words - see 1e for the false-positive risk.
 GET {{endpoint}}/contentsafety/text/blocklists/{{blocklist}}/blocklistItems?api-version={{apiVersion}}
 Authorization: Bearer {{token}}
+
+###############################################################################
+# Everything below this line WRITES. It operates on a disposable blocklist
+# called "http-scratch" and never modifies {{blocklist}}, which the gateway
+# depends on.
+###############################################################################
 
 ### 3d. Create or update a blocklist.
 ###
