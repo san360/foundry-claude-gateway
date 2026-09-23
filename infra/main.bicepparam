@@ -104,6 +104,12 @@ param gatewayGuardrails = true
 // Harm severity that trips a block, on the 0-7 EightSeverityLevels scale.
 // 4 blocks medium and above, which is the closest analogue to the Azure OpenAI
 // default content filter.
+//
+// Note the direction: Azure defines 0 as MOST restrictive and 7 as LEAST, and
+// content below the threshold is allowed. Raising this number loosens the
+// guardrail. Lower it to tighten. Measured on this deployment: a mass-casualty
+// violence prompt scores 5 (blocked at 4), while a vaguer bomb-making prompt
+// scores 1 and is allowed. See docs/08-guardrails.md.
 param gatewayGuardrailSeverityThreshold = 4
 
 // Content Safety scores some genuinely harmful prompts 0 in every harm

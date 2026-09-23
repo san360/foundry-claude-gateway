@@ -47,6 +47,29 @@
 #   written down next to it.
 #
 #   Current deployed value: 4 for Hate, SelfHarm, Sexual and Violence.
+#
+# WHAT THE NUMBERS MEAN
+#   Severity is what THIS API returns, per category, 0-7. Higher is worse:
+#
+#     0-1  Safe    general, journalistic, scientific, medical, professional use
+#     2-3  Low     opinionated or offensive language, stereotyping, fiction
+#     4-5  Medium  demeaning language; seeking or executing harmful instructions
+#     6-7  High    explicit severe harm, glorification, extreme or illegal acts
+#
+#   Threshold is what APIM compares against: it blocks when
+#   severity >= threshold. Microsoft defines the range as 0 (MOST restrictive)
+#   to 7 (LEAST restrictive), so:
+#
+#     RAISING the number RAISES tolerance. Lowering it lowers tolerance.
+#
+#   It is a tolerance dial, not a security dial - the opposite of the usual
+#   intuition. Threshold 1 is near-zero tolerance and unusable in practice;
+#   4 is moderate; 6 only catches the High band. Going 1 -> 4 LOOSENS the
+#   guardrail.
+#
+#   Run 1b and 1b-contrast to see this concretely: two prompts about building
+#   a bomb, severity 5 and 1, on opposite sides of the threshold. Full detail
+#   in docs/08-guardrails.md.
 ###############################################################################
 
 @endpoint   = {{$dotenv CONTENT_SAFETY_ENDPOINT}}

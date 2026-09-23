@@ -196,8 +196,21 @@ param gatewayGuardrails bool = true
 
 @description('''
 Block a request when any Content Safety harm category scores at or above this
-severity, on the EightSeverityLevels scale (0-7). 2 is permissive, 4 blocks
-medium and above, 6 blocks only severe content.
+severity, on the EightSeverityLevels scale (0-7).
+
+This is a TOLERANCE dial, not a security dial: Azure defines 0 as the most
+restrictive value and 7 as the least, and content scoring BELOW the threshold
+is allowed through. Raising the number therefore loosens the guardrail.
+
+  1  near-zero tolerance - blocks part of the "Safe" band. Not usable.
+  2  strict - also catches discussion ABOUT sensitive topics. False positives
+     on security and medical work.
+  4  moderate. Blocks the Medium band and above. Closest analogue to the Azure
+     OpenAI default content filter, and the measured sweet spot here: blocked
+     all six attack prompts, allowed all three controls.
+  6  permissive. Only the High band. A severity-5 mass-casualty prompt passes.
+
+Severity 0 cannot be blocked by any threshold - see gatewayGuardrailBlocklistName.
 ''')
 @minValue(1)
 @maxValue(7)
